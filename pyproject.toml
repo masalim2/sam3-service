@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sam3_inference_server"
+version = "0.0.0"
+description = "ALCF Inference Server for SAM3 (Segment Anything Model 3)"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    {name = "Misha Salim"}
+]
+dependencies = [
+    "sam3[dev,notebooks,train]",
+    "rich",
+    "typer",
+    "fastapi",
+    "uvicorn[standard]",
+    "numpy",
+    "Pillow",
+    "smart_open",
+]
+
+[tool.uv.sources]
+sam3 = { git = "https://github.com/facebookresearch/sam3" }
