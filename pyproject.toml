@@ -1,9 +1,9 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
 
 [project]
-name = "sam3_inference_server"
+name = "sam3server"
 version = "0.0.0"
 description = "ALCF Inference Server for SAM3 (Segment Anything Model 3)"
 readme = "README.md"
@@ -20,6 +20,12 @@ dependencies = [
     "numpy",
     "Pillow",
     "smart_open",
+    "setuptools<82", # yes, sam3 actually depends on this
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
 ]
 
 [tool.uv.sources]
