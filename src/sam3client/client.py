@@ -1,18 +1,20 @@
-from PIL import Image
-import smart_open
-import requests
-import typer
-import numpy as np
-import matplotlib.pyplot as plt
-from rich import print
+import base64
+import gzip
+import io
 
-from sam3.visualization_utils import COLORS,  plot_mask, plot_bbox
 import matplotlib.pyplot as plt
 import numpy as np
-import base64, gzip, io, numpy as np
+import requests
+import smart_open
+import typer
+from PIL import Image
+from rich import print
+from sam3.visualization_utils import COLORS, plot_bbox, plot_mask
+
 
 def load_b64_npy(s: str):
     return np.load(io.BytesIO(gzip.decompress(base64.b64decode(s))))
+
 
 def plot_results(img, results, path):
     plt.figure(figsize=(12, 8))
@@ -40,15 +42,21 @@ def plot_results(img, results, path):
 
 cli = typer.Typer()
 
+
 @cli.command()
-def infer(image_uri: str, text_prompt: str, base_url: str = "http://sophia-gpu-10:8000", result_path: str = "result-preview.png") -> None:
+def infer(
+    image_uri: str,
+    text_prompt: str,
+    base_url: str = "http://sophia-gpu-10:8000",
+    result_path: str = "result-preview.png",
+) -> None:
     resp = requests.post(
         base_url,
         json={
             "image_uri": image_uri,
             "text_prompt": text_prompt,
             "box_prompts": [],
-        }
+        },
     )
     resp.raise_for_status()
     results = resp.json()
@@ -58,8 +66,8 @@ def infer(image_uri: str, text_prompt: str, base_url: str = "http://sophia-gpu-1
 
     print(f"Found {len(scores)} objects")
     print(f"Scores: {scores}")
-    print("Bounding boxes:", *boxes, sep='\n')
-    
+    print("Bounding boxes:", *boxes, sep="\n")
+
     with smart_open.open(image_uri, "rb") as fp:
         image = Image.open(fp)
         plot_results(image, results, result_path)

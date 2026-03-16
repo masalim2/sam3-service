@@ -21,6 +21,8 @@ dependencies = [
     "Pillow",
     "smart_open",
     "setuptools<82", # yes, sam3 actually depends on this
+    "transformers",
+    "webdataset",
 ]
 
 [dependency-groups]
