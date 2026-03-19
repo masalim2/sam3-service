@@ -3,7 +3,7 @@ requires = ["uv_build>=0.10.9,<0.11.0"]
 build-backend = "uv_build"
 
 [project]
-name = "sam3server"
+name = "sam3-service"
 version = "0.0.0"
 description = "ALCF Inference Server for SAM3 (Segment Anything Model 3)"
 readme = "README.md"
@@ -12,7 +12,6 @@ authors = [
     {name = "Misha Salim"}
 ]
 dependencies = [
-    "sam3[dev,notebooks,train]",
     "rich",
     "typer",
     "fastapi",
@@ -20,15 +19,16 @@ dependencies = [
     "numpy",
     "Pillow",
     "smart_open",
-    "setuptools<82", # yes, sam3 actually depends on this
     "transformers",
+    "torch",
+    "torchvision",
     "webdataset",
+    "matplotlib",
+    "requests",
+    "tifffile",
 ]
 
 [dependency-groups]
 dev = [
     "ruff",
 ]
-
-[tool.uv.sources]
-sam3 = { git = "https://github.com/facebookresearch/sam3" }
