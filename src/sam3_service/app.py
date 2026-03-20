@@ -9,6 +9,7 @@ from rich.logging import RichHandler
 from .executor import SAM3Executor
 from .schema import (
     ProcessImageRequest,
+    ErrorResponse,
     ProcessImageResponse,
     ProcessWebDatasetRequest,
     ProcessWebDatasetResponse,
@@ -49,7 +50,7 @@ app = FastAPI(lifespan=worker_lifespan)
 @app.post("/process-wds")
 async def process_webdataset(
     payload: ProcessWebDatasetRequest, executor: Executor
-) -> ProcessWebDatasetResponse:
+) -> ProcessWebDatasetResponse | ErrorResponse:
     """
     Submit a path to a WebDataset for SAM3 segmentation.
     """
@@ -60,7 +61,7 @@ async def process_webdataset(
 @app.post("/process-image")
 async def process_image(
     payload: ProcessImageRequest, executor: Executor
-) -> ProcessImageResponse:
+) -> ProcessImageResponse | ErrorResponse:
     """
     Submit a single image URI for SAM3 segmentation.
     """

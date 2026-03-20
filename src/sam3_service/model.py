@@ -2,6 +2,8 @@ import logging
 from time import perf_counter
 from typing import Any
 
+import numpy as np
+import numpy.typing as npt
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, IterableDataset
@@ -12,15 +14,35 @@ from .schema import SAM3Result, SamplePrompt
 
 logger = logging.getLogger(__name__)
 processor = Sam3Processor.from_pretrained(CHECKPOINT_DIR, local_files_only=True)
+NDArray = npt.NDArray[Any]
 
-def quantile_norm(img):
-    import numpy as np
-    p_lo, p_hi = np.percentile(img, [1, 99])
-    img = np.clip((img - p_lo) / (p_hi - p_lo), 0, 1)
 
-    # Convert to uint8 0-255 range, which is what vision preprocessors expect
-    img = (img * 255).astype(np.uint8)
-    return img[np.newaxis,:,:]
+def quantile_norm(image: NDArray | Image.Image) -> NDArray:
+    if isinstance(image, Image.Image):
+        if image.mode == "RGBA":
+            image = image.convert("RGB")
+        image = np.array(image)
+
+    # Vision models expect a color channel:
+    if image.ndim == 2:
+        image = image[np.newaxis, :, :]
+
+    assert image.ndim == 3
+
+    if image.shape[2] == 4:
+        image = image[:, :, :3]
+    elif image.shape[0] == 4:
+        image = image[:3, :, :]
+
+    # If floating dtype, normalize and clamp pixel intensities such that
+    # the 1st percentile is 0 and 99th percentile is 255
+    if not np.issubdtype(image.dtype, np.integer):
+        p_lo, p_hi = np.percentile(image, [1, 99])
+        image = np.clip((image - p_lo) / (p_hi - p_lo), 0, 1)
+        image = (image * 255).astype(np.uint8)
+
+    return image
+
 
 def preprocess(samples: list[SamplePrompt]) -> tuple[list[SamplePrompt], BatchEncoding]:
     """
@@ -70,10 +92,9 @@ class Sam3Wrapper:
     @torch.autocast("cuda", dtype=torch.bfloat16)
     @torch.inference_mode()
     def infer_image(self, image: Image.Image, text_prompt: str) -> SAM3Result:
-        image = quantile_norm(image)
-        inputs = processor(images=image, text=text_prompt, return_tensors="pt").to(
-            self.device
-        )
+        inputs = processor(
+            images=quantile_norm(image), text=text_prompt, return_tensors="pt"
+        ).to(self.device)
         outputs = self.model(**inputs)
         r = processor.post_process_instance_segmentation(
             outputs,
@@ -93,8 +114,8 @@ class Sam3Wrapper:
     def infer_batch(
         self,
         dataset: IterableDataset[SamplePrompt],
-        threshold: float = 0.3,
-        mask_threshold: float = 0.3,
+        threshold: float = 0.5,
+        mask_threshold: float = 0.5,
         batch_size: int = 16,
         loader_num_workers: int = 2,
     ) -> list[SAM3Result]:

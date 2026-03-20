@@ -17,10 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def tiff_decoder(data):
-    arr = tifffile.imread(io.BytesIO(data))
-    if arr.ndim == 2:
-        arr = arr[np.newaxis, :, :]
-    return arr
+    return tifffile.imread(io.BytesIO(data))
 
 
 def _expand_prompts(samples: Iterable[dict[str, Any]]) -> Iterator[SamplePrompt]:

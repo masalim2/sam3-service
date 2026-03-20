@@ -1,4 +1,3 @@
-import numpy as np
 import logging
 import multiprocessing as mp
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -169,11 +168,7 @@ class SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
 
     def handle_image_request(self, task_id: TaskId, task: ProcessImageRequest) -> None:
         with smart_open.open(task.image_uri, "rb") as fp:
-            # NB: a typical tomographic reconstruction is a monochromatic TIFF of dtype float32
-            # with values in teh range [-5.0e-5, 2.0e-4].  Calling PIL.Image.convert('RGB') will 
-            # indiscriminately squash this to a uint8 of pure zeroes.  You really want to do a 
-            # quantile normalization prior to feeding it to the SAM3 preprocessor!
-            image = np.array(Image.open(fp))
+            image = Image.open(fp)
             res = self.model.infer_image(image, task.text_prompt)
 
         resp = ProcessImageResponse(
