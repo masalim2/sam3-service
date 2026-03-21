@@ -12,23 +12,27 @@ import torch
 from PIL import Image
 from rich.logging import RichHandler
 
-from .io import build_dataset, save_batch
+from .io import build_dataloader, save_batch
 from .model import Sam3Wrapper
 from .schema import (
-    ErrorResponse,
-    ProcessImageRequest,
-    ProcessImageResponse,
-    ProcessWebDatasetRequest,
-    ProcessWebDatasetResponse,
+    BatchRequest,
+    BatchResponse,
+    ImageRequest,
+    ImageResponse,
     SAM3Result,
 )
 
 logger = logging.getLogger(__name__)
 
-Task = ProcessWebDatasetRequest | ProcessImageRequest
-Result = ProcessWebDatasetResponse | ProcessImageResponse | ErrorResponse
-TaskId = NewType("TaskId", str)
+Request = BatchRequest | ImageRequest
+RequestId = NewType("RequestId", str)
 MP_CONTEXT = mp.get_context("spawn")
+
+
+class SAM3Error(RuntimeError): ...
+
+
+Result = BatchResponse | ImageResponse | SAM3Error
 
 
 class SAM3Executor:
@@ -40,31 +44,29 @@ class SAM3Executor:
             )
 
         self.exit_event = MP_CONTEXT.Event()
-        self.task_q: Queue[tuple[TaskId, Task]] = MP_CONTEXT.Queue()  # type: ignore
-        self.result_q: Queue[tuple[TaskId, Result]] = MP_CONTEXT.Queue()  # type: ignore
-        self.futures: dict[TaskId, Future[Result]] = {}
+        self.request_q: Queue[tuple[RequestId, Request]] = MP_CONTEXT.Queue()  # type: ignore
+        self.result_q: Queue[tuple[RequestId, Result]] = MP_CONTEXT.Queue()  # type: ignore
+        self.futures: dict[RequestId, Future[Result]] = {}
 
         self.workers = [
-            SAM3Worker(
+            _SAM3Worker(
                 gpu_id=gpu_id,
                 exit_event=self.exit_event,
-                task_q=self.task_q,
+                request_q=self.request_q,
                 result_q=self.result_q,
             )
             for gpu_id in range(num_gpus)
         ]
 
     @overload
-    def submit(
-        self, request: ProcessWebDatasetRequest
-    ) -> Future[ProcessWebDatasetResponse]: ...
+    def submit(self, request: BatchRequest) -> Future[BatchResponse]: ...
     @overload
-    def submit(self, request: ProcessImageRequest) -> Future[ProcessImageResponse]: ...
-    def submit(self, request: Task) -> Future[Result]:
-        task_id = TaskId(uuid4().hex)
-        self.task_q.put_nowait((task_id, request))
-        self.futures[task_id] = Future()
-        return self.futures[task_id]
+    def submit(self, request: ImageRequest) -> Future[ImageResponse]: ...
+    def submit(self, request: Request) -> Future[Result]:
+        req_id = RequestId(uuid4().hex)
+        self.request_q.put_nowait((req_id, request))
+        self.futures[req_id] = Future()
+        return self.futures[req_id]
 
     def _health_checker(self):
         while not self.exit_event.wait(timeout=3.0):
@@ -77,11 +79,15 @@ class SAM3Executor:
     def _result_collector(self):
         while not self.exit_event.is_set():
             try:
-                task_id, result = self.result_q.get(timeout=1.0)
+                req_id, result = self.result_q.get(timeout=1.0)
             except Empty:
                 continue
+
+            future = self.futures.pop(req_id)
+
+            if isinstance(result, Exception):
+                future.set_exception(result)
             else:
-                future = self.futures.pop(task_id)
                 future.set_result(result)
 
     def start(self):
@@ -108,7 +114,7 @@ class SAM3Executor:
         logger.info("SAM3Executor shutdown gracefully")
 
 
-class SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
+class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
     model: Sam3Wrapper
     writer_pool: ThreadPoolExecutor
 
@@ -116,13 +122,13 @@ class SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
         self,
         gpu_id: int,
         exit_event: Event,
-        task_q: Queue[tuple[TaskId, Task]],
-        result_q: Queue[tuple[TaskId, Result]],
+        request_q: Queue[tuple[RequestId, Request]],
+        result_q: Queue[tuple[RequestId, Result]],
     ) -> None:
         super().__init__()
         self.gpu_id = gpu_id
         self.exit_event = exit_event
-        self.task_q = task_q
+        self.request_q = request_q
         self.result_q = result_q
 
     def run(self) -> None:
@@ -139,58 +145,57 @@ class SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
 
         while not self.exit_event.is_set():
             try:
-                task_id, task = self.task_q.get(timeout=1.0)
+                req_id, request = self.request_q.get(timeout=1.0)
             except Empty:
                 continue
 
             try:
-                self.handle_task(task_id, task)
+                self.dispatch(req_id, request)
             except Exception as exc:
-                logger.exception(msg := f"SAM3 Worker Error for {task=}: {exc}")
-                self.result_q.put((task_id, ErrorResponse(error=msg)))
+                logger.exception(msg := f"Worker exception during {request=}: {exc}")
+                self.result_q.put((req_id, SAM3Error(msg)))
 
         self.writer_pool.shutdown(wait=True)
 
-    def handle_task(self, task_id: TaskId, task: Task) -> None:
-        if isinstance(task, ProcessWebDatasetRequest):
-            self.handle_webdataset_request(task_id, task)
-        elif isinstance(task, ProcessImageRequest):
-            self.handle_image_request(task_id, task)
+    def dispatch(self, req_id: RequestId, request: Request) -> None:
+        if isinstance(request, BatchRequest):
+            self.handle_batch_request(req_id, request)
+        elif isinstance(request, ImageRequest):
+            self.handle_image_request(req_id, request)
         else:
-            raise AssertionError(f"Unknown request type: {task}")
+            raise AssertionError(f"Unknown request type: {request}")
 
-    def handle_webdataset_request(
-        self, task_id: TaskId, task: ProcessWebDatasetRequest
-    ) -> None:
-        dataset = build_dataset(task.dataset_path)
-        results = self.model.infer_batch(dataset, batch_size=4, loader_num_workers=4)
-        self.writer_pool.submit(self.save_webdataset_results, task_id, results, task)
+    def handle_batch_request(self, req_id: RequestId, request: BatchRequest) -> None:
+        loader = build_dataloader(request.dataset_path, batch_size=4, num_workers=4)
+        results = self.model.infer_batch(loader)
+        self.writer_pool.submit(self.save_batch_results, req_id, results, request)
 
-    def handle_image_request(self, task_id: TaskId, task: ProcessImageRequest) -> None:
-        with smart_open.open(task.image_uri, "rb") as fp:
+    def handle_image_request(self, req_id: RequestId, request: ImageRequest) -> None:
+        with smart_open.open(request.image_uri, "rb") as fp:
             image = Image.open(fp)
-            res = self.model.infer_image(image, task.text_prompt)
+            res = self.model.infer_image(image, request.text_prompt)
 
-        resp = ProcessImageResponse(
+        resp = ImageResponse(
             num_objects=len(res.scores),
             boxes=res.boxes,
             scores=res.scores,
         )
-        self.result_q.put((task_id, resp))
+        self.result_q.put((req_id, resp))
 
-    def save_webdataset_results(
+    def save_batch_results(
         self,
-        task_id: TaskId,
+        req_id: RequestId,
         results: list[SAM3Result],
-        task: ProcessWebDatasetRequest,
+        request: BatchRequest,
     ) -> None:
         try:
-            result_dir = task.dataset_path.with_suffix(".results")
+            result_dir = request.dataset_path.with_suffix(".results")
             save_batch(results, result_dir)
         except Exception as exc:
-            logger.exception(msg := f"SAM3 Worker Error for {task=}: {exc}")
-            self.result_q.put((task_id, ErrorResponse(error=msg)))
-        else:
-            self.result_q.put(
-                (task_id, ProcessWebDatasetResponse(result_dir=result_dir))
+            logger.exception(
+                msg
+                := f"Worker Exception while saving batch results for {request=}: {exc}"
             )
+            self.result_q.put((req_id, SAM3Error(msg)))
+        else:
+            self.result_q.put((req_id, BatchResponse(result_dir=result_dir)))

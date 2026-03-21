@@ -1,74 +1,25 @@
 import logging
 from time import perf_counter
-from typing import Any
 
 import numpy as np
-import numpy.typing as npt
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, IterableDataset
-from transformers import BatchEncoding, Sam3Model, Sam3Processor
+from torch.utils.data import DataLoader
+from transformers import BatchEncoding, Sam3Model
 
 from .config import CHECKPOINT_DIR
-from .schema import SAM3Result, SamplePrompt
+from .io import preprocess_image, processor
+from .schema import SAM3Result, Sample
 
 logger = logging.getLogger(__name__)
-processor = Sam3Processor.from_pretrained(CHECKPOINT_DIR, local_files_only=True)
-NDArray = npt.NDArray[Any]
 
 
-def quantile_norm(image: NDArray | Image.Image) -> NDArray:
-    if isinstance(image, Image.Image):
-        if image.mode == "RGBA":
-            image = image.convert("RGB")
-        image = np.array(image)
-
-    # Vision models expect a color channel:
-    if image.ndim == 2:
-        image = image[np.newaxis, :, :]
-
-    assert image.ndim == 3
-
-    if image.shape[2] == 4:
-        image = image[:, :, :3]
-    elif image.shape[0] == 4:
-        image = image[:3, :, :]
-
-    # If floating dtype, normalize and clamp pixel intensities such that
-    # the 1st percentile is 0 and 99th percentile is 255
-    if not np.issubdtype(image.dtype, np.integer):
-        p_lo, p_hi = np.percentile(image, [1, 99])
-        image = np.clip((image - p_lo) / (p_hi - p_lo), 0, 1)
-        image = (image * 255).astype(np.uint8)
-
-    return image
-
-
-def preprocess(samples: list[SamplePrompt]) -> tuple[list[SamplePrompt], BatchEncoding]:
-    """
-    Preprocess SamplePrompts into SAM3 input batches.
-    """
-    text_prompts = [s.text for s in samples]
-    box_prompts = [
-        [list(box[:4]) for box in s.boxes] if s.boxes else None for s in samples
-    ]
-    box_labels = [
-        [int(box.label) for box in s.boxes] if s.boxes else None for s in samples
-    ]
-
-    process_kwargs: dict[str, Any] = {
-        "images": [quantile_norm(s.image) for s in samples],
-        "return_tensors": "pt",
-    }
-
-    if any(text_prompts):
-        process_kwargs["text"] = text_prompts
-    if any(box_prompts):
-        process_kwargs["input_boxes"] = box_prompts
-        process_kwargs["input_boxes_labels"] = box_labels
-
-    inputs = processor(**process_kwargs)
-    return samples, inputs
+def to_labelmap(masks: torch.Tensor):
+    if masks.shape[0] > 0:
+        labelmap = masks.argmax(dim=0).byte() + 1
+        labelmap[~masks.any(dim=0)] = 0
+        return labelmap.cpu().numpy()
+    return np.zeros(masks.shape[1:])
 
 
 class Sam3Wrapper:
@@ -92,48 +43,33 @@ class Sam3Wrapper:
     @torch.autocast("cuda", dtype=torch.bfloat16)
     @torch.inference_mode()
     def infer_image(self, image: Image.Image, text_prompt: str) -> SAM3Result:
-        inputs = processor(
-            images=quantile_norm(image), text=text_prompt, return_tensors="pt"
-        ).to(self.device)
+        inputs = preprocess_image(image, text_prompt).to(self.device)
         outputs = self.model(**inputs)
         r = processor.post_process_instance_segmentation(
             outputs,
             threshold=0.5,
             mask_threshold=0.5,
-            target_sizes=inputs.get("original_sizes").tolist(),
+            target_sizes=inputs["original_sizes"].tolist(),  # type: ignore[unresolved-attribute]
         )[0]
         return SAM3Result(
             key=text_prompt,
             scores=r["scores"].cpu().tolist(),
             boxes=r["boxes"].cpu().tolist(),
-            masks=r["masks"].cpu().float().numpy(),
+            masks=to_labelmap(r["masks"]),
         )
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
     @torch.inference_mode()
     def infer_batch(
         self,
-        dataset: IterableDataset[SamplePrompt],
+        loader: DataLoader[tuple[list[Sample], BatchEncoding]],
         threshold: float = 0.5,
         mask_threshold: float = 0.5,
-        batch_size: int = 16,
-        loader_num_workers: int = 2,
     ) -> list[SAM3Result]:
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            num_workers=loader_num_workers,
-            collate_fn=preprocess,
-            pin_memory=True,
-            in_order=False,
-            persistent_workers=False,
-            multiprocessing_context="fork",
-        )
-
         total_images = 0
         results = []
-
         t0 = perf_counter()
+
         for samples, inputs in loader:
             inputs = inputs.to(self.device, non_blocking=True)
 
@@ -148,10 +84,10 @@ class Sam3Wrapper:
 
             results.extend(
                 SAM3Result(
-                    key=s.key,
+                    key=s.name,
                     scores=r["scores"].cpu().tolist(),
                     boxes=r["boxes"].cpu().tolist(),
-                    masks=r["masks"].cpu().float().numpy(),
+                    masks=to_labelmap(r["masks"]),
                 )
                 for s, r in zip(samples, postprocessed)
             )

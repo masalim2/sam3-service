@@ -22,7 +22,6 @@ dependencies = [
     "transformers",
     "torch",
     "torchvision",
-    "webdataset",
     "matplotlib",
     "requests",
     "tifffile",

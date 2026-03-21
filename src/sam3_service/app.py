@@ -4,15 +4,15 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 from rich.logging import RichHandler
 
-from .executor import SAM3Executor
+from .executor import SAM3Error, SAM3Executor
 from .schema import (
-    ProcessImageRequest,
-    ErrorResponse,
-    ProcessImageResponse,
-    ProcessWebDatasetRequest,
-    ProcessWebDatasetResponse,
+    BatchRequest,
+    BatchResponse,
+    ImageRequest,
+    ImageResponse,
 )
 
 logging.basicConfig(
@@ -47,21 +47,22 @@ async def worker_lifespan(app: FastAPI):
 app = FastAPI(lifespan=worker_lifespan)
 
 
-@app.post("/process-wds")
-async def process_webdataset(
-    payload: ProcessWebDatasetRequest, executor: Executor
-) -> ProcessWebDatasetResponse | ErrorResponse:
+@app.exception_handler(SAM3Error)
+async def sam3_error_handler(_req: Request, exc: SAM3Error):
+    return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
+@app.post("/process-batch")
+async def process_batch(payload: BatchRequest, executor: Executor) -> BatchResponse:
     """
-    Submit a path to a WebDataset for SAM3 segmentation.
+    Submit a path to a WebDataset .tar file for batched SAM3 segmentation.
     """
     future = executor.submit(payload)
     return await asyncio.wrap_future(future)
 
 
 @app.post("/process-image")
-async def process_image(
-    payload: ProcessImageRequest, executor: Executor
-) -> ProcessImageResponse | ErrorResponse:
+async def process_image(payload: ImageRequest, executor: Executor) -> ImageResponse:
     """
     Submit a single image URI for SAM3 segmentation.
     """

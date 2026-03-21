@@ -11,7 +11,9 @@ from pathlib import Path
 
 import numpy as np
 import requests
+import tifffile
 import typer
+from PIL import Image
 from rich.logging import RichHandler
 
 cli = typer.Typer()
@@ -23,25 +25,59 @@ def load_b64_npy(s: str):
     return np.load(io.BytesIO(gzip.decompress(base64.b64decode(s))))
 
 
+def _add_member(tf: tarfile.TarFile, filename: str, buf: BytesIO) -> None:
+    info = tarfile.TarInfo(filename)
+    buf.seek(0, io.SEEK_END)
+    info.size = buf.tell()
+
+    buf.seek(0)
+    tf.addfile(info, buf)
+
+
+def convert_image(img_path: Path) -> BytesIO:
+    """
+    Converts images to uint8-quantized npy format with a channel dimension.
+    SAM3 preprocessing expects 1 or 3 channel dims and will squash intensities
+    in a smaller dynamic range.  So, we might as well cut the precision down
+    locally before we send data over.
+    """
+    if img_path.suffix in (".tif", ".tiff"):
+        image = tifffile.imread(img_path)
+    else:
+        image = Image.open(img_path)
+        if image.mode == "RGBA":
+            image = image.convert("RGB")
+        image = np.array(image)
+
+    if image.ndim == 2:
+        image = image[np.newaxis, :, :]
+
+    if not np.issubdtype(image.dtype, np.integer):
+        lo, hi = np.percentile(image, (1, 99))
+        image = np.clip((image - lo) / (hi - lo), 0, 1)
+        image = (image * 255).astype(np.uint8)
+
+    buf = BytesIO()
+    np.save(buf, image)
+    buf.seek(0)
+    return buf
+
+
 def write_wds_shard(
     tar_path: Path, image_paths: list[Path], text_prompts: list[str]
 ) -> None:
+    """
+    Create a tar (aka WebDataset) of paired .npy/.json prompts to SAM3.
+    """
     prompt_json = BytesIO(
         json.dumps({"prompts": [{"text": tp} for tp in text_prompts]}).encode()
     )
-    prompt_size = len(prompt_json.getvalue())
 
     logger.info(f"Writing {len(image_paths)} images to shard: {tar_path}")
-    with tarfile.open(tar_path, mode="w:gz", compresslevel=4) as writer:
+    with tarfile.open(tar_path, mode="w") as writer:
         for path in sorted(image_paths):
-            writer.add(str(path), arcname=path.name)
-
-            info = tarfile.TarInfo(path.with_suffix(".json").name)
-            info.size = prompt_size
-            prompt_json.seek(0)
-            writer.addfile(info, prompt_json)
-
-    logger.info(f"Wrote shard: {tar_path}")
+            _add_member(writer, path.with_suffix(".npy").name, convert_image(path))
+            _add_member(writer, path.with_suffix(".json").name, prompt_json)
 
 
 def plot_results(img, results, path):
@@ -71,7 +107,7 @@ def plot_results(img, results, path):
 
 
 @cli.command()
-def submit_webdataset(
+def submit_batch(
     dataset_path: str,
     base_url: str = "http://sophia-gpu-10:8000",
 ) -> None:
@@ -105,29 +141,27 @@ def create_webdataset(
     image_ext: str,
     text_prompts: list[str],
     *,
-    shard_dir: Path | None = None,
+    output_dir: Path | None = None,
     shard_size: int = 100,
     num_workers: int = 4,
 ) -> None:
     """
     Package images in IMAGE_DIR with suffix IMAGE_EXT into WebDataset format with one or
-    more SAM3 TEXT_PROMPTS. Shards of SHARD_SIZE are written to SHARD_DIR using
+    more SAM3 TEXT_PROMPTS. Shards of SHARD_SIZE are written to OUTPUT_DIR using
     NUM_WORKERS parallel workers.  For example:
 
     python prepare_webdataset.py /example/tomo_00104/sand1/ tiff 'grain' 'granule'
     """
-    if shard_dir is None:
-        shard_dir = image_dir.with_name(f"{image_dir.name}-webdataset-shards")
+    if output_dir is None:
+        output_dir = image_dir.with_name(f"{image_dir.name}-webdataset-shards")
 
-    shard_dir = Path(shard_dir).resolve()
-    shard_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     image_ext = image_ext.strip(".")
-    source_paths = [f for f in Path(image_dir).glob(f"*.{image_ext}")]
+    source_paths = list(Path(image_dir).glob(f"*.{image_ext}"))
     if not source_paths:
-        raise RuntimeError(
-            f"No files found in {image_dir} with the .{image_ext} extension"
-        )
+        raise RuntimeError(f"No '.{image_ext}' files found in {image_dir}")
 
     num_shards = ceil(len(source_paths) / shard_size)
     shards = [
@@ -138,7 +172,7 @@ def create_webdataset(
     with ProcessPoolExecutor(max_workers=num_workers) as pool:
         futs = []
         for i, shard in enumerate(shards):
-            tar_path = shard_dir / f"shard-{i:05d}.tar.gz"
+            tar_path = output_dir / f"shard-{i:05d}.tar"
             futs.append(pool.submit(write_wds_shard, tar_path, shard, text_prompts))
 
         logger.info("Waiting for shard writes to finish...")
