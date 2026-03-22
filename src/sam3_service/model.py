@@ -1,5 +1,6 @@
 import logging
 from time import perf_counter
+from typing import Iterator
 
 import numpy as np
 import torch
@@ -8,7 +9,7 @@ from torch.utils.data import DataLoader
 from transformers import BatchEncoding, Sam3Model
 
 from .config import CHECKPOINT_DIR
-from .io import preprocess_image, processor
+from .data import preprocess_image, processor
 from .schema import SAM3Result, Sample
 
 logger = logging.getLogger(__name__)
@@ -65,9 +66,8 @@ class Sam3Wrapper:
         loader: DataLoader[tuple[list[Sample], BatchEncoding]],
         threshold: float = 0.5,
         mask_threshold: float = 0.5,
-    ) -> list[SAM3Result]:
+    ) -> Iterator[SAM3Result]:
         total_images = 0
-        results = []
         t0 = perf_counter()
 
         for samples, inputs in loader:
@@ -82,7 +82,7 @@ class Sam3Wrapper:
                 mask_threshold=mask_threshold,
             )
 
-            results.extend(
+            yield from (
                 SAM3Result(
                     key=s.name,
                     scores=r["scores"].cpu().tolist(),
@@ -98,5 +98,3 @@ class Sam3Wrapper:
                 f"Cumulative: {total_images} images , "
                 f"{total_images / elapsed:.1f} img/s avg"
             )
-
-        return results

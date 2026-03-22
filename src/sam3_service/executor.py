@@ -1,18 +1,22 @@
+import json
 import logging
 import multiprocessing as mp
+import tarfile
 from concurrent.futures import Future, ThreadPoolExecutor
+from io import BytesIO
 from multiprocessing.synchronize import Event
 from queue import Empty, Queue
 from threading import Thread
 from typing import NewType, overload
 from uuid import uuid4
 
+import numpy as np
 import smart_open
 import torch
 from PIL import Image
 from rich.logging import RichHandler
 
-from .io import build_dataloader, save_batch
+from .data import build_dataloader
 from .model import Sam3Wrapper
 from .schema import (
     BatchRequest,
@@ -21,6 +25,7 @@ from .schema import (
     ImageResponse,
     SAM3Result,
 )
+from .tar_helpers import add_member
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +121,7 @@ class SAM3Executor:
 
 class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
     model: Sam3Wrapper
-    writer_pool: ThreadPoolExecutor
+    writer_thread: ThreadPoolExecutor
 
     def __init__(
         self,
@@ -141,7 +146,9 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
 
         logger.info(f"Loading SAM3Wrapper on {self.gpu_id=}")
         self.model = Sam3Wrapper(self.gpu_id)
-        self.writer_pool = ThreadPoolExecutor(max_workers=5)
+
+        # Must be single-threaded; tarfile is not threadsafe:
+        self.writer_thread = ThreadPoolExecutor(max_workers=1)
 
         while not self.exit_event.is_set():
             try:
@@ -155,7 +162,7 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
                 logger.exception(msg := f"Worker exception during {request=}: {exc}")
                 self.result_q.put((req_id, SAM3Error(msg)))
 
-        self.writer_pool.shutdown(wait=True)
+        self.writer_thread.shutdown(wait=True)
 
     def dispatch(self, req_id: RequestId, request: Request) -> None:
         if isinstance(request, BatchRequest):
@@ -167,8 +174,18 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
 
     def handle_batch_request(self, req_id: RequestId, request: BatchRequest) -> None:
         loader = build_dataloader(request.dataset_path, batch_size=4, num_workers=4)
-        results = self.model.infer_batch(loader)
-        self.writer_pool.submit(self.save_batch_results, req_id, results, request)
+
+        result_path = request.dataset_path.with_suffix(".results.tar")
+        write_futs: list[Future] = []
+
+        with tarfile.open(result_path, mode="w") as tf:
+            for result in self.model.infer_batch(loader):
+                fut = self.writer_thread.submit(self.save_result, result, tf)
+                write_futs.append(fut)
+
+        for fut in write_futs:
+            fut.result(timeout=90)
+        self.result_q.put((req_id, BatchResponse(result_path=result_path)))
 
     def handle_image_request(self, req_id: RequestId, request: ImageRequest) -> None:
         with smart_open.open(request.image_uri, "rb") as fp:
@@ -182,20 +199,18 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
         )
         self.result_q.put((req_id, resp))
 
-    def save_batch_results(
-        self,
-        req_id: RequestId,
-        results: list[SAM3Result],
-        request: BatchRequest,
-    ) -> None:
-        try:
-            result_dir = request.dataset_path.with_suffix(".results")
-            save_batch(results, result_dir)
-        except Exception as exc:
-            logger.exception(
-                msg
-                := f"Worker Exception while saving batch results for {request=}: {exc}"
-            )
-            self.result_q.put((req_id, SAM3Error(msg)))
-        else:
-            self.result_q.put((req_id, BatchResponse(result_dir=result_dir)))
+    def save_result(self, result: SAM3Result, tf: tarfile.TarFile) -> None:
+        out = {
+            "key": result.key,
+            "num_objects": len(result.scores),
+            "scores": result.scores,
+            "boxes": result.boxes,
+            "masks_file": f"{result.key}_masks.npy",
+        }
+        add_member(
+            tf, f"{result.key}.json", BytesIO(json.dumps(out, indent=2).encode())
+        )
+
+        buf = BytesIO()
+        np.save(buf, result.masks)
+        add_member(tf, f"{result.key}_labels.npy", buf)

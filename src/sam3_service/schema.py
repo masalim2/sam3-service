@@ -81,7 +81,7 @@ class BatchResponse(BaseModel):
     Response for completed WebDataset batch inference task
     """
 
-    result_dir: Path
+    result_path: Path
 
 
 class ImageResponse(BaseModel):

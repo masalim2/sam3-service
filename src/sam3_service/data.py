@@ -3,7 +3,6 @@ import logging
 import tarfile
 from collections import defaultdict
 from pathlib import Path
-from time import perf_counter
 from typing import IO, Any, Callable
 
 import numpy as np
@@ -14,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import BatchEncoding, Sam3Processor
 
 from .config import CHECKPOINT_DIR
-from .schema import Prompt, SAM3Result, Sample
+from .schema import Prompt, Sample
 
 NDArray = npt.NDArray[Any]
 logging.basicConfig(level="INFO")
@@ -161,29 +160,3 @@ def build_dataloader(
         persistent_workers=False,
         multiprocessing_context="fork",
     )
-
-
-def save_batch(results: list[SAM3Result], output_dir: Path) -> None:
-    checked_dirs = set()
-
-    t0 = perf_counter()
-    for result in results:
-        out = {
-            "key": result.key,
-            "num_objects": len(result.scores),
-            "scores": result.scores,
-            "boxes": result.boxes,
-            "masks_file": f"{result.key}_masks.npy",
-        }
-
-        out_path = output_dir / f"{result.key}.result.json"
-        if out_path.parent not in checked_dirs:
-            out_path.parent.mkdir(exist_ok=True, parents=True)
-            checked_dirs.add(out_path.parent)
-
-        with open(out_path, "w") as f:
-            json.dump(out, f, indent=2)
-
-        np.save(output_dir / f"{result.key}_masks.npy", result.masks)
-    elapsed = perf_counter() - t0
-    logger.info(f"Saved {len(results)} results to {output_dir} in {elapsed:.1f} sec")

@@ -16,6 +16,8 @@ import typer
 from PIL import Image
 from rich.logging import RichHandler
 
+from .tar_helpers import add_member
+
 cli = typer.Typer()
 logging.basicConfig(level="INFO", handlers=[RichHandler()])
 logger = logging.getLogger("sam3_service.client")
@@ -23,15 +25,6 @@ logger = logging.getLogger("sam3_service.client")
 
 def load_b64_npy(s: str):
     return np.load(io.BytesIO(gzip.decompress(base64.b64decode(s))))
-
-
-def _add_member(tf: tarfile.TarFile, filename: str, buf: BytesIO) -> None:
-    info = tarfile.TarInfo(filename)
-    buf.seek(0, io.SEEK_END)
-    info.size = buf.tell()
-
-    buf.seek(0)
-    tf.addfile(info, buf)
 
 
 def convert_image(img_path: Path) -> BytesIO:
@@ -76,8 +69,8 @@ def write_wds_shard(
     logger.info(f"Writing {len(image_paths)} images to shard: {tar_path}")
     with tarfile.open(tar_path, mode="w") as writer:
         for path in sorted(image_paths):
-            _add_member(writer, path.with_suffix(".npy").name, convert_image(path))
-            _add_member(writer, path.with_suffix(".json").name, prompt_json)
+            add_member(writer, path.with_suffix(".npy").name, convert_image(path))
+            add_member(writer, path.with_suffix(".json").name, prompt_json)
 
 
 def plot_results(img, results, path):
