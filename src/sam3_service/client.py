@@ -16,7 +16,7 @@ import typer
 from PIL import Image
 from rich.logging import RichHandler
 
-from .tar_helpers import add_member
+from sam3_service.tar_helpers import add_member
 
 cli = typer.Typer()
 logging.basicConfig(level="INFO", handlers=[RichHandler()])
@@ -106,11 +106,14 @@ def submit_batch(
 ) -> None:
     logger.info("Sending request...")
     resp = requests.post(
-        f"{base_url}/process-wds",
+        f"{base_url}/process-batch",
         json={"dataset_path": dataset_path},
     )
+    try:
+        logger.info(resp.json())
+    except:
+        pass
     resp.raise_for_status()
-    logger.info(resp.json())
 
 
 @cli.command()
@@ -124,8 +127,11 @@ def submit_image(
         f"{base_url}/process-image",
         json={"image_uri": image_uri, "text_prompt": prompt},
     )
+    try:
+        logger.info(resp.json())
+    except:
+        pass
     resp.raise_for_status()
-    logger.info(resp.json())
 
 
 @cli.command()

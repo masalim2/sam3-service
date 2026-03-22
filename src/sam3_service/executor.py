@@ -183,8 +183,10 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
                 fut = self.writer_thread.submit(self.save_result, result, tf)
                 write_futs.append(fut)
 
-        for fut in write_futs:
-            fut.result(timeout=90)
+            for fut in write_futs:
+                fut.result(timeout=90)
+
+        logger.info(f"Batch inference outputs written to {result_path}")
         self.result_q.put((req_id, BatchResponse(result_path=result_path)))
 
     def handle_image_request(self, req_id: RequestId, request: ImageRequest) -> None:

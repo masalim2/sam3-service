@@ -21,13 +21,17 @@ logger = logging.getLogger(__name__)
 
 processor = Sam3Processor.from_pretrained(CHECKPOINT_DIR, local_files_only=True)
 
+def _pil_load(path: Path) -> Image.Image:
+    img = Image.open(path)
+    img.load()
+    return img
 
 class WebDataset(Dataset[Sample]):
     _decoders: dict[str, Callable[[IO[bytes]], Image.Image | NDArray]] = {
-        ".jpg": Image.open,
-        ".jpeg": Image.open,
-        ".png": Image.open,
-        ".webp": Image.open,
+        ".jpg": _pil_load,
+        ".jpeg": _pil_load,
+        ".png": _pil_load,
+        ".webp": _pil_load,
         ".tif": tifffile.imread,
         ".tiff": tifffile.imread,
         ".npy": np.load,
