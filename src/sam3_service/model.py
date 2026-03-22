@@ -70,6 +70,9 @@ class Sam3Wrapper:
         total_images = 0
         t0 = perf_counter()
 
+        samples: list[Sample]
+        inputs: BatchEncoding
+
         for samples, inputs in loader:
             inputs = inputs.to(self.device, non_blocking=True)
 
