@@ -1,5 +1,4 @@
 import json
-import logging
 import tarfile
 from collections import defaultdict
 from pathlib import Path
@@ -16,18 +15,18 @@ from .config import CHECKPOINT_DIR
 from .schema import Prompt, Sample
 
 NDArray = npt.NDArray[Any]
-logging.basicConfig(level="INFO")
-logger = logging.getLogger(__name__)
 
 processor = Sam3Processor.from_pretrained(CHECKPOINT_DIR, local_files_only=True)
 
-def _pil_load(path: Path) -> Image.Image:
+
+def _pil_load(path: IO[bytes] | Path) -> Image.Image:
     img = Image.open(path)
     img.load()
     return img
 
+
 class WebDataset(Dataset[Sample]):
-    _decoders: dict[str, Callable[[IO[bytes]], Image.Image | NDArray]] = {
+    _decoders: dict[str, Callable[[IO[bytes] | Path], Image.Image | NDArray]] = {
         ".jpg": _pil_load,
         ".jpeg": _pil_load,
         ".png": _pil_load,
@@ -114,10 +113,6 @@ def preprocess_batch(samples: list[Sample]) -> tuple[list[Sample], BatchEncoding
     """
     Preprocess Samples from webdataset.
     """
-    import os
-
-    logger.info(f"Preprocessing {[s.name for s in samples]} on {os.getpid()=}")
-
     images = []
     text_prompts = []
     box_prompts = []

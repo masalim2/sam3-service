@@ -27,6 +27,9 @@ dependencies = [
     "tifffile",
 ]
 
+[project.scripts]
+sam3 = "sam3_service.client:cli"
+
 [dependency-groups]
 dev = [
     "ruff",

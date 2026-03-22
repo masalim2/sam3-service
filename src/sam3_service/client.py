@@ -18,7 +18,7 @@ from rich.logging import RichHandler
 
 from sam3_service.tar_helpers import add_member
 
-cli = typer.Typer()
+cli = typer.Typer(no_args_is_help=True)
 logging.basicConfig(level="INFO", handlers=[RichHandler()])
 logger = logging.getLogger("sam3_service.client")
 
@@ -101,19 +101,16 @@ def plot_results(img, results, path):
 
 @cli.command()
 def submit_batch(
-    dataset_path: str,
+    dataset_path: Path,
     base_url: str = "http://sophia-gpu-10:8000",
 ) -> None:
     logger.info("Sending request...")
     resp = requests.post(
         f"{base_url}/process-batch",
-        json={"dataset_path": dataset_path},
+        json={"dataset_path": dataset_path.resolve().as_posix()},
     )
-    try:
-        logger.info(resp.json())
-    except:
-        pass
     resp.raise_for_status()
+    logger.info(resp.json())
 
 
 @cli.command()
@@ -123,15 +120,16 @@ def submit_image(
     base_url: str = "http://sophia-gpu-10:8000",
 ) -> None:
     logger.info("Sending request...")
+
+    if "://" not in image_uri:
+        image_uri = "file://" + Path(image_uri).resolve().as_posix()
+
     resp = requests.post(
         f"{base_url}/process-image",
         json={"image_uri": image_uri, "text_prompt": prompt},
     )
-    try:
-        logger.info(resp.json())
-    except:
-        pass
     resp.raise_for_status()
+    logger.info(resp.json())
 
 
 @cli.command()
@@ -145,11 +143,9 @@ def create_webdataset(
     num_workers: int = 4,
 ) -> None:
     """
-    Package images in IMAGE_DIR with suffix IMAGE_EXT into WebDataset format with one or
-    more SAM3 TEXT_PROMPTS. Shards of SHARD_SIZE are written to OUTPUT_DIR using
-    NUM_WORKERS parallel workers.  For example:
-
-    python prepare_webdataset.py /example/tomo_00104/sand1/ tiff 'grain' 'granule'
+    Bundle images+text prompts into WebDataset tar archives.
+    Example:
+    sam3 create-webdataset ./images/ .tiff "granule" "white shape"
     """
     if output_dir is None:
         output_dir = image_dir.with_name(f"{image_dir.name}-webdataset-shards")
@@ -161,6 +157,8 @@ def create_webdataset(
     source_paths = list(Path(image_dir).glob(f"*.{image_ext}"))
     if not source_paths:
         raise RuntimeError(f"No '.{image_ext}' files found in {image_dir}")
+
+    assert len(text_prompts) > 0
 
     num_shards = ceil(len(source_paths) / shard_size)
     shards = [
