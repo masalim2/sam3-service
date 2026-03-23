@@ -3,14 +3,15 @@ from time import perf_counter
 from typing import Iterator
 
 import numpy as np
+import smart_open
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader
 from transformers import BatchEncoding, Sam3Model
 
 from .config import CHECKPOINT_DIR
-from .data import preprocess_image, processor
-from .schema import SAM3Result, Sample
+from .data import InputInfo, preprocess_image, processor
+from .schema import ImageRequest, SAM3ImageResult
 
 logger = logging.getLogger(__name__)
 
@@ -43,37 +44,44 @@ class Sam3Wrapper:
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
     @torch.inference_mode()
-    def infer_image(self, image: Image.Image, text_prompt: str) -> SAM3Result:
-        inputs = preprocess_image(image, text_prompt).to(self.device)
+    def infer_image(self, request: ImageRequest) -> SAM3ImageResult:
+        with smart_open.open(request.image_uri, "rb") as fp:
+            image = Image.open(fp)
+            inputs = preprocess_image(image, request.prompt).to(self.device)
+
         outputs = self.model(**inputs)
+
         r = processor.post_process_instance_segmentation(
             outputs,
             threshold=0.5,
             mask_threshold=0.5,
             target_sizes=inputs["original_sizes"].tolist(),  # type: ignore[unresolved-attribute]
         )[0]
-        return SAM3Result(
-            key=text_prompt,
+
+        return SAM3ImageResult(
+            input_image=request.image_uri,
+            prompt=request.prompt,
+            batch_slug="",
             scores=r["scores"].cpu().tolist(),
             boxes=r["boxes"].cpu().tolist(),
-            masks=to_labelmap(r["masks"]),
+            labelmap_npy=to_labelmap(r["masks"]),
         )
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
     @torch.inference_mode()
     def infer_batch(
         self,
-        loader: DataLoader[tuple[list[Sample], BatchEncoding]],
+        loader: DataLoader,
         threshold: float = 0.5,
         mask_threshold: float = 0.5,
-    ) -> Iterator[SAM3Result]:
+    ) -> Iterator[SAM3ImageResult]:
         total_images = 0
         t0 = perf_counter()
 
-        samples: list[Sample]
+        info_list: list[InputInfo]
         inputs: BatchEncoding
 
-        for samples, inputs in loader:
+        for info_list, inputs in loader:
             inputs = inputs.to(self.device, non_blocking=True)
 
             outputs = self.model(**inputs)
@@ -86,16 +94,18 @@ class Sam3Wrapper:
             )
 
             yield from (
-                SAM3Result(
-                    key=s.name,
+                SAM3ImageResult(
+                    input_image=info.image_filename,
+                    prompt=info.prompt,
+                    batch_slug=info.batch_slug,
                     scores=r["scores"].cpu().tolist(),
                     boxes=r["boxes"].cpu().tolist(),
-                    masks=to_labelmap(r["masks"]),
+                    labelmap_npy=to_labelmap(r["masks"]),
                 )
-                for s, r in zip(samples, postprocessed)
+                for info, r in zip(info_list, postprocessed)
             )
 
-            total_images += len(samples)
+            total_images += len(info_list)
             elapsed = perf_counter() - t0
             logger.info(
                 f"Cumulative: {total_images} images , "

@@ -24,7 +24,7 @@ logger = logging.getLogger("sam3_service.client")
 
 
 def load_b64_npy(s: str):
-    return np.load(io.BytesIO(gzip.decompress(base64.b64decode(s))))
+    return np.load(io.BytesIO(gzip.decompress(base64.b64decode(s))), allow_pickle=False)
 
 
 def convert_image(img_path: Path) -> BytesIO:
@@ -118,6 +118,7 @@ def submit_image(
     image_uri: str,
     prompt: str,
     base_url: str = "http://sophia-gpu-10:8000",
+    save_preview: Path | None = None,
 ) -> None:
     logger.info("Sending request...")
 

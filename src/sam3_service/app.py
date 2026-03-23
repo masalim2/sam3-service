@@ -12,7 +12,7 @@ from .schema import (
     BatchRequest,
     BatchResponse,
     ImageRequest,
-    ImageResponse,
+    SAM3ImageResult,
 )
 
 logging.basicConfig(
@@ -62,7 +62,7 @@ async def process_batch(payload: BatchRequest, executor: Executor) -> BatchRespo
 
 
 @app.post("/process-image")
-async def process_image(payload: ImageRequest, executor: Executor) -> ImageResponse:
+async def process_image(payload: ImageRequest, executor: Executor) -> SAM3ImageResult:
     """
     Submit a single image URI for SAM3 segmentation.
     """

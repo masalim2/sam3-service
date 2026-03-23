@@ -1,6 +1,7 @@
 import json
 import tarfile
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Callable
 
@@ -12,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import BatchEncoding, Sam3Processor
 
 from .config import CHECKPOINT_DIR
-from .schema import Prompt, Sample
+from .schema import Prompt
 
 NDArray = npt.NDArray[Any]
 
@@ -25,15 +26,39 @@ def _pil_load(path: IO[bytes] | Path) -> Image.Image:
     return img
 
 
+def _np_safeload(buf: IO[bytes] | Path) -> NDArray:
+    return np.load(buf, allow_pickle=False)
+
+
+@dataclass
+class Sample:
+    """
+    Sample for inference: a named image with one or more Prompts.
+
+    Each Prompt in turn may be a compound text+bounding boxes prompt.
+    """
+
+    image_filename: str
+    image: Image.Image | NDArray
+    prompts: list[Prompt]
+
+
+@dataclass
+class InputInfo:
+    image_filename: str
+    batch_slug: str
+    prompt: Prompt
+
+
 class WebDataset(Dataset[Sample]):
     _decoders: dict[str, Callable[[IO[bytes] | Path], Image.Image | NDArray]] = {
-        ".jpg": _pil_load,
-        ".jpeg": _pil_load,
-        ".png": _pil_load,
-        ".webp": _pil_load,
-        ".tif": tifffile.imread,
-        ".tiff": tifffile.imread,
-        ".npy": np.load,
+        "jpg": _pil_load,
+        "jpeg": _pil_load,
+        "png": _pil_load,
+        "webp": _pil_load,
+        "tif": tifffile.imread,
+        "tiff": tifffile.imread,
+        "npy": _np_safeload,
     }
 
     def __init__(self, tar_path: str | Path) -> None:
@@ -42,35 +67,39 @@ class WebDataset(Dataset[Sample]):
             filenames = [f.name for f in tf if f.isfile()]
 
         self.suffix_map: dict[str, list[str]] = defaultdict(list)
-        self.path_map = {}
+
         for name in filenames:
-            key = str(Path(name).with_suffix(""))
-            suffix = Path(name).suffix
-            self.suffix_map[key].append(suffix)
-            self.path_map[(key, suffix)] = name
+            base, *suffix = name.split(".", 1)
+            if suffix and (ext := suffix[0]):
+                self.suffix_map[base].append(ext)
 
         self.suffix_map = {
             key: suffixes
             for key, suffixes in self.suffix_map.items()
-            if ".json" in suffixes and any(ext in suffixes for ext in self._decoders)
+            if "json" in suffixes and any(ext in suffixes for ext in self._decoders)
         }
+
+        # Have basename keys like 'foo/001' corresponding to pairs such as
+        # foo/001.json and foo/001.tiff
         self.keys = sorted(self.suffix_map.keys())
 
     def __getitem__(self, index: int) -> Sample:
         key = self.keys[index]
+
         with tarfile.open(self.tar_path) as tf:
-            json_path = self.path_map[key, ".json"]
-            assert (json_fp := tf.extractfile(json_path)) is not None
+            assert (json_fp := tf.extractfile(f"{key}.json")) is not None
             prompts = json.load(json_fp).get("prompts", [])
 
-            image_ext = next(
-                ext for ext in self.suffix_map[key] if ext in self._decoders
-            )
-            image_path = self.path_map[key, image_ext]
-            assert (image_fp := tf.extractfile(image_path)) is not None
-            image = self._decoders[image_ext](image_fp)
+            ext = next(e for e in self.suffix_map[key] if e in self._decoders)
+            image_name = f"{key}.{ext}"
+            assert (image_fp := tf.extractfile(image_name)) is not None
+            image = self._decoders[ext](image_fp)
 
-        return Sample(name=key, image=image, prompts=[Prompt(**p) for p in prompts])
+        return Sample(
+            image_filename=image_name,
+            image=image,
+            prompts=[Prompt(**p) for p in prompts],
+        )
 
     def __len__(self):
         return len(self.keys)
@@ -91,9 +120,14 @@ def quantile_norm(image: NDArray | Image.Image) -> NDArray:
     # If floating dtype, normalize and clamp pixel intensities such that
     # the 1st percentile is 0 and 99th percentile is 255
 
-    # N.B. this is required to get any results out of float32 TIFFs but a major
-    # bottleneck (reduces throughput from 4.7 to 0.8 img/sec on tomo dataset)
-    # Suggest running this on the client to save on transfer time too:
+    # N.B. this is required to get any results out of float32 TIFFs but can
+    # become a CPU-intensive bottleneck. Handle it here to be robust, but
+    # suggest quantizing on the client to cut the size down BEFORE
+    # sending over the network!
+
+    # Also, clients may wish to use the intensity range over an entire volume,
+    # not per-slice, which can only be done by computing percentiles ahead of
+    # time.
     if not np.issubdtype(image.dtype, np.integer):
         p_lo, p_hi = np.percentile(image, [1, 99])
         image = np.clip((image - p_lo) / (p_hi - p_lo), 0, 1)
@@ -102,14 +136,24 @@ def quantile_norm(image: NDArray | Image.Image) -> NDArray:
     return image
 
 
-def preprocess_image(image: Image.Image, text_prompt: str) -> BatchEncoding:
+def preprocess_image(image: Image.Image, prompt: Prompt) -> BatchEncoding:
     """
-    Preprocess single image + text prompt
+    Preprocess single image + text prompt with optional boxes
     """
-    return processor(images=quantile_norm(image), text=text_prompt, return_tensors="pt")
+    box_kwargs = {}
+    if prompt.boxes:
+        box_kwargs["input_boxes"] = [[list(box[:4]) for box in prompt.boxes]]
+        box_kwargs["input_boxes_labels"] = [[int(box.label) for box in prompt.boxes]]
+
+    return processor(
+        images=quantile_norm(image),
+        text=prompt.text,
+        return_tensors="pt",
+        **box_kwargs,
+    )
 
 
-def preprocess_batch(samples: list[Sample]) -> tuple[list[Sample], BatchEncoding]:
+def preprocess_batch(samples: list[Sample]) -> tuple[list[InputInfo], BatchEncoding]:
     """
     Preprocess Samples from webdataset.
     """
@@ -117,10 +161,11 @@ def preprocess_batch(samples: list[Sample]) -> tuple[list[Sample], BatchEncoding
     text_prompts = []
     box_prompts = []
     box_labels = []
+    info_list = []
 
     for sample in samples:
         sample.image = quantile_norm(sample.image)
-        for prompt in sample.prompts:
+        for i, prompt in enumerate(sample.prompts):
             images.append(sample.image)
             text_prompts.append(prompt.text)
             box_prompts.append(
@@ -128,6 +173,14 @@ def preprocess_batch(samples: list[Sample]) -> tuple[list[Sample], BatchEncoding
             )
             box_labels.append(
                 [int(box.label) for box in prompt.boxes] if prompt.boxes else None
+            )
+            basename = sample.image_filename.split(".")[0]
+            info_list.append(
+                InputInfo(
+                    image_filename=sample.image_filename,
+                    batch_slug=f"{basename}_{i}",
+                    prompt=prompt,
+                )
             )
 
     process_kwargs: dict[str, Any] = {
@@ -142,11 +195,11 @@ def preprocess_batch(samples: list[Sample]) -> tuple[list[Sample], BatchEncoding
         process_kwargs["input_boxes_labels"] = box_labels
 
     inputs = processor(**process_kwargs)
-    return samples, inputs
+    return info_list, inputs
 
 
 def build_dataloader(
-    tar_path: Path | str, batch_size: int = 4, num_workers: int = 4
+    tar_path: Path | str, batch_size: int, num_workers: int
 ) -> DataLoader:
     dataset = WebDataset(tar_path)
     return DataLoader(

@@ -1,19 +1,14 @@
-import json
 import logging
 import multiprocessing as mp
 import tarfile
 from concurrent.futures import Future, ThreadPoolExecutor
-from io import BytesIO
 from multiprocessing.synchronize import Event
 from queue import Empty, Queue
 from threading import Thread
 from typing import NewType, overload
 from uuid import uuid4
 
-import numpy as np
-import smart_open
 import torch
-from PIL import Image
 from rich.logging import RichHandler
 
 from .data import build_dataloader
@@ -22,10 +17,8 @@ from .schema import (
     BatchRequest,
     BatchResponse,
     ImageRequest,
-    ImageResponse,
-    SAM3Result,
+    SAM3ImageResult,
 )
-from .tar_helpers import add_member
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +30,7 @@ MP_CONTEXT = mp.get_context("spawn")
 class SAM3Error(RuntimeError): ...
 
 
-Result = BatchResponse | ImageResponse | SAM3Error
+Result = BatchResponse | SAM3ImageResult | SAM3Error
 
 
 class SAM3Executor:
@@ -66,7 +59,7 @@ class SAM3Executor:
     @overload
     def submit(self, request: BatchRequest) -> Future[BatchResponse]: ...
     @overload
-    def submit(self, request: ImageRequest) -> Future[ImageResponse]: ...
+    def submit(self, request: ImageRequest) -> Future[SAM3ImageResult]: ...
     def submit(self, request: Request) -> Future[Result]:
         req_id = RequestId(uuid4().hex)
         self.request_q.put_nowait((req_id, request))
@@ -173,14 +166,14 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
             raise AssertionError(f"Unknown request type: {request}")
 
     def handle_batch_request(self, req_id: RequestId, request: BatchRequest) -> None:
-        loader = build_dataloader(request.dataset_path, batch_size=4, num_workers=4)
+        loader = build_dataloader(request.dataset_path, batch_size=4, num_workers=8)
 
         result_path = request.dataset_path.with_suffix(".results.tar")
         write_futs: list[Future] = []
 
         with tarfile.open(result_path, mode="w") as tf:
             for result in self.model.infer_batch(loader):
-                fut = self.writer_thread.submit(self.save_result, result, tf)
+                fut = self.writer_thread.submit(result.dump_to_tarfile, tf)
                 write_futs.append(fut)
 
             for fut in write_futs:
@@ -190,29 +183,5 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
         self.result_q.put((req_id, BatchResponse(result_path=result_path)))
 
     def handle_image_request(self, req_id: RequestId, request: ImageRequest) -> None:
-        with smart_open.open(request.image_uri, "rb") as fp:
-            image = Image.open(fp)
-            res = self.model.infer_image(image, request.text_prompt)
-
-        resp = ImageResponse(
-            num_objects=len(res.scores),
-            boxes=res.boxes,
-            scores=res.scores,
-        )
-        self.result_q.put((req_id, resp))
-
-    def save_result(self, result: SAM3Result, tf: tarfile.TarFile) -> None:
-        out = {
-            "key": result.key,
-            "num_objects": len(result.scores),
-            "scores": result.scores,
-            "boxes": result.boxes,
-            "masks_file": f"{result.key}_masks.npy",
-        }
-        add_member(
-            tf, f"{result.key}.json", BytesIO(json.dumps(out, indent=2).encode())
-        )
-
-        buf = BytesIO()
-        np.save(buf, result.masks)
-        add_member(tf, f"{result.key}_labels.npy", buf)
+        result = self.model.infer_image(request)
+        self.result_q.put((req_id, result))
