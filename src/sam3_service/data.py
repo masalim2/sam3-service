@@ -1,7 +1,9 @@
 import json
+import logging
 import tarfile
 from collections import defaultdict
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import IO, Any, Callable
 
@@ -14,9 +16,11 @@ from transformers import BatchEncoding, Sam3Processor
 
 from .config import CHECKPOINT_DIR
 from .schema import Prompt
+from .utils import quantile_norm
 
 NDArray = npt.NDArray[Any]
 
+logger = logging.getLogger(__name__)
 processor = Sam3Processor.from_pretrained(CHECKPOINT_DIR, local_files_only=True)
 
 
@@ -27,7 +31,9 @@ def _pil_load(path: IO[bytes] | Path) -> Image.Image:
 
 
 def _np_safeload(buf: IO[bytes] | Path) -> NDArray:
-    return np.load(buf, allow_pickle=False)
+    if isinstance(buf, Path):
+        buf = buf.open("rb")
+    return np.load(BytesIO(buf.read()), allow_pickle=False)
 
 
 @dataclass
@@ -69,7 +75,7 @@ class WebDataset(Dataset[Sample]):
         self.suffix_map: dict[str, list[str]] = defaultdict(list)
 
         for name in filenames:
-            base, *suffix = name.split(".", 1)
+            base, *suffix = name.rsplit(".", 1)
             if suffix and (ext := suffix[0]):
                 self.suffix_map[base].append(ext)
 
@@ -82,6 +88,10 @@ class WebDataset(Dataset[Sample]):
         # Have basename keys like 'foo/001' corresponding to pairs such as
         # foo/001.json and foo/001.tiff
         self.keys = sorted(self.suffix_map.keys())
+        if self.keys:
+            logger.info(f"Initialized WebDataset with {len(self.keys)} keys")
+        else:
+            logger.warning(f"No samples in WebDataset {self.tar_path}")
 
     def __getitem__(self, index: int) -> Sample:
         key = self.keys[index]
@@ -103,37 +113,6 @@ class WebDataset(Dataset[Sample]):
 
     def __len__(self):
         return len(self.keys)
-
-
-def quantile_norm(image: NDArray | Image.Image) -> NDArray:
-    if isinstance(image, Image.Image):
-        if image.mode == "RGBA":
-            image = image.convert("RGB")
-        image = np.array(image)
-
-    # Vision models expect a color channel:
-    if image.ndim == 2:
-        image = image[np.newaxis, :, :]
-
-    assert image.ndim == 3
-
-    # If floating dtype, normalize and clamp pixel intensities such that
-    # the 1st percentile is 0 and 99th percentile is 255
-
-    # N.B. this is required to get any results out of float32 TIFFs but can
-    # become a CPU-intensive bottleneck. Handle it here to be robust, but
-    # suggest quantizing on the client to cut the size down BEFORE
-    # sending over the network!
-
-    # Also, clients may wish to use the intensity range over an entire volume,
-    # not per-slice, which can only be done by computing percentiles ahead of
-    # time.
-    if not np.issubdtype(image.dtype, np.integer):
-        p_lo, p_hi = np.percentile(image, [1, 99])
-        image = np.clip((image - p_lo) / (p_hi - p_lo), 0, 1)
-        image = (image * 255).astype(np.uint8)
-
-    return image
 
 
 def preprocess_image(image: Image.Image, prompt: Prompt) -> BatchEncoding:
@@ -174,7 +153,7 @@ def preprocess_batch(samples: list[Sample]) -> tuple[list[InputInfo], BatchEncod
             box_labels.append(
                 [int(box.label) for box in prompt.boxes] if prompt.boxes else None
             )
-            basename = sample.image_filename.split(".")[0]
+            basename = sample.image_filename.rsplit(".")[0]
             info_list.append(
                 InputInfo(
                     image_filename=sample.image_filename,

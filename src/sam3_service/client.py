@@ -1,6 +1,3 @@
-import base64
-import gzip
-import io
 import json
 import logging
 import tarfile
@@ -8,50 +5,40 @@ from concurrent.futures import ProcessPoolExecutor, wait
 from io import BytesIO
 from math import ceil
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import requests
+import smart_open
 import tifffile
 import typer
 from PIL import Image
 from rich.logging import RichHandler
 
+from sam3_service.schema import SAM3ImageResult
 from sam3_service.tar_helpers import add_member
+from sam3_service.utils import preview_sam3_result, quantile_norm
 
-cli = typer.Typer(no_args_is_help=True)
+NDArray = npt.NDArray[Any]
+
 logging.basicConfig(level="INFO", handlers=[RichHandler()])
 logger = logging.getLogger("sam3_service.client")
 
-
-def load_b64_npy(s: str):
-    return np.load(io.BytesIO(gzip.decompress(base64.b64decode(s))), allow_pickle=False)
+cli = typer.Typer(no_args_is_help=True)
 
 
-def convert_image(img_path: Path) -> BytesIO:
-    """
-    Converts images to uint8-quantized npy format with a channel dimension.
-    SAM3 preprocessing expects 1 or 3 channel dims and will squash intensities
-    in a smaller dynamic range.  So, we might as well cut the precision down
-    locally before we send data over.
-    """
+def load_image(img_path: Path) -> NDArray:
     if img_path.suffix in (".tif", ".tiff"):
         image = tifffile.imread(img_path)
     else:
         image = Image.open(img_path)
-        if image.mode == "RGBA":
-            image = image.convert("RGB")
-        image = np.array(image)
+    return quantile_norm(image)
 
-    if image.ndim == 2:
-        image = image[np.newaxis, :, :]
 
-    if not np.issubdtype(image.dtype, np.integer):
-        lo, hi = np.percentile(image, (1, 99))
-        image = np.clip((image - lo) / (hi - lo), 0, 1)
-        image = (image * 255).astype(np.uint8)
-
+def to_npy(arr: NDArray) -> BytesIO:
     buf = BytesIO()
-    np.save(buf, image)
+    np.save(buf, arr)
     buf.seek(0)
     return buf
 
@@ -69,34 +56,8 @@ def write_wds_shard(
     logger.info(f"Writing {len(image_paths)} images to shard: {tar_path}")
     with tarfile.open(tar_path, mode="w") as writer:
         for path in sorted(image_paths):
-            add_member(writer, path.with_suffix(".npy").name, convert_image(path))
+            add_member(writer, path.with_suffix(".npy").name, to_npy(load_image(path)))
             add_member(writer, path.with_suffix(".json").name, prompt_json)
-
-
-def plot_results(img, results, path):
-    # from sam3.visualization_utils import COLORS, plot_bbox, plot_mask
-    # plt.figure(figsize=(12, 8))
-    # plt.imshow(img)
-
-    # nb_objects = len(results["scores"])
-
-    # for i in range(nb_objects):
-    #     color = COLORS[i % len(COLORS)]
-    #     plot_mask(results["masks"][i].squeeze(0).cpu(), color=color)
-    #     w, h = img.size
-    #     prob = results["scores"][i].item()
-    #     plot_bbox(
-    #         h,
-    #         w,
-    #         results["boxes"][i].cpu(),
-    #         text=f"(id={i}, {prob=:.2f})",
-    #         box_format="XYXY",
-    #         color=color,
-    #         relative_coords=False,
-    #     )
-    # plt.savefig(path)
-    # logger.info(f"Saved result preview to {path}.")
-    pass
 
 
 @cli.command()
@@ -104,6 +65,11 @@ def submit_batch(
     dataset_path: Path,
     base_url: str = "http://sophia-gpu-10:8000",
 ) -> None:
+    """
+    Submit a WebDataset-structured tar file for batch inference.
+    Example:
+    sam3-service submit-batch ./test.tar
+    """
     logger.info("Sending request...")
     resp = requests.post(
         f"{base_url}/process-batch",
@@ -127,10 +93,52 @@ def submit_image(
 
     resp = requests.post(
         f"{base_url}/process-image",
-        json={"image_uri": image_uri, "text_prompt": prompt},
+        json={"image_uri": image_uri, "prompt": {"text": prompt}},
     )
     resp.raise_for_status()
-    logger.info(resp.json())
+
+    result = SAM3ImageResult.model_validate(resp.json())
+    logger.info(result.model_dump(exclude={"labelmap_npy"}))
+
+    logger.info("Generating local preview of segmentation results...")
+    if save_preview and result.num_objects > 0:
+        with smart_open.open(image_uri, "rb") as fp:
+            image = quantile_norm(Image.open(fp))
+            preview_sam3_result(image, result, save_preview)
+            logger.info(f"Saved segmentation result preview to {save_preview}")
+
+
+@cli.command()
+def preview_batch_results(input_tar: Path, result_tar: Path) -> None:
+    preview_dir = result_tar.with_suffix(".preview")
+    preview_dir.mkdir(exist_ok=True)
+
+    with tarfile.open(result_tar) as tf, tarfile.open(input_tar) as img_tf:
+        jsons = [f.name for f in tf if f.isfile() and f.name.endswith(".json")]
+        for fname in jsons:
+            assert (result_fp := tf.extractfile(fname)) is not None
+
+            result = json.load(result_fp)
+
+            if result["num_objects"] < 1:
+                logger.info(f"Skipping {fname}: no objects detected.")
+                continue
+
+            assert (img_fp := img_tf.extractfile(result["input_image"])) is not None
+            image = quantile_norm(np.load(BytesIO(img_fp.read())))
+
+            assert (
+                label_fp := tf.extractfile(fname.replace(".json", ".labels.npy"))
+            ) is not None
+            labelmap = np.load(BytesIO(label_fp.read()))
+
+            result = SAM3ImageResult(**result, labelmap_npy=labelmap)
+
+            png_path = preview_dir / Path(fname).with_suffix(".png").name
+            logger.info(f"Generating preview: {png_path.name} ...")
+
+            preview_sam3_result(image, result, png_path)
+            logger.info(f"Saved preview: {png_path}")
 
 
 @cli.command()
@@ -146,7 +154,7 @@ def create_webdataset(
     """
     Bundle images+text prompts into WebDataset tar archives.
     Example:
-    sam3 create-webdataset ./images/ .tiff "granule" "white shape"
+    sam3-service create-webdataset ./images/ .tiff "granule" "white shape"
     """
     if output_dir is None:
         output_dir = image_dir.with_name(f"{image_dir.name}-webdataset-shards")

@@ -38,9 +38,11 @@ def to_ndarray(obj: Any) -> NDArray:
 
 def encode_npy(arr: NDArray) -> str:
     buf = BytesIO()
+
     with gzip.open(buf, "wb", compresslevel=1) as gzfp:
         np.save(gzfp, arr)
-        return base64.b64encode(buf.getbuffer()).decode()
+
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 CompressedNDArray = Annotated[

@@ -40,7 +40,7 @@ class Sam3Wrapper:
             CHECKPOINT_DIR, local_files_only=True
         ).to(self.device)  # type: ignore
 
-        logger.info(f"Loaded SAM3 on {gpu_id=}")
+        logger.info(f"Loaded SAM3 from {CHECKPOINT_DIR} on {gpu_id=}")
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
     @torch.inference_mode()

@@ -28,7 +28,7 @@ dependencies = [
 ]
 
 [project.scripts]
-sam3 = "sam3_service.client:cli"
+sam3-service = "sam3_service.client:cli"
 
 [dependency-groups]
 dev = [
