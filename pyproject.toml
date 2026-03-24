@@ -25,6 +25,8 @@ dependencies = [
     "matplotlib",
     "requests",
     "tifffile",
+    "globus-compute-endpoint",
+    "globus-compute-sdk",
 ]
 
 [project.scripts]
