@@ -4,11 +4,6 @@ from globus_compute_sdk import Client
 
 gcc = Client()
 
-# sophia-sam3 endpoint @ /home/openinference_svc/
-ENDPOINT_ID = "25662117-d605-4f43-af9b-1b9ae390e4e2"
-BASE_URL = "http://localhost:8000"
-
-
 def submit_batch(dataset_path: str | Path):
     from pathlib import Path
 
