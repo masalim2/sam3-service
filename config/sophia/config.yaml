@@ -1,5 +1,4 @@
 amqp_port: 443
 display_name: sophia-sam3
 allowed_functions:
-  - 2b11a95d-4199-4efd-bb59-450d5be35868
-  - 82798750-395f-4df3-befd-6cd59fd2fe1c
+  - 26ff10a2-c944-4f1d-bf53-d3df96bf5baa
