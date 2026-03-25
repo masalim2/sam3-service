@@ -5,12 +5,14 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing.synchronize import Event
 from queue import Empty, Queue
 from threading import Thread
+from time import perf_counter
 from typing import NewType, overload
 from uuid import uuid4
 
 import torch
 from rich.logging import RichHandler
 
+from .config import CHECKPOINT_DIR
 from .data import build_dataloader
 from .model import Sam3Wrapper
 from .schema import (
@@ -171,6 +173,7 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
         result_path = request.dataset_path.with_suffix(".results.tar")
         write_futs: list[Future] = []
 
+        t0 = perf_counter()
         with tarfile.open(result_path, mode="w") as tf:
             for result in self.model.infer_batch(loader):
                 fut = self.writer_thread.submit(result.dump_to_tarfile, tf)
@@ -180,7 +183,13 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
                 fut.result(timeout=90)
 
         logger.info(f"Batch inference outputs written to {result_path}")
-        self.result_q.put((req_id, BatchResponse(result_path=result_path)))
+        info = {
+            "model_weights": CHECKPOINT_DIR.as_posix(),
+            "prompts/sec": len(write_futs) / (perf_counter() - t0),
+        }
+        self.result_q.put(
+            (req_id, BatchResponse(result_path=result_path, runtime_info=info))
+        )
 
     def handle_image_request(self, req_id: RequestId, request: ImageRequest) -> None:
         result = self.model.infer_image(request)

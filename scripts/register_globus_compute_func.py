@@ -4,10 +4,12 @@ from globus_compute_sdk import Client
 
 gcc = Client()
 
+
 def submit_batch(dataset_path: str | Path):
     from pathlib import Path
 
     import requests
+
     BASE_URL = "http://localhost:8000"
 
     dataset_path = Path(dataset_path).resolve()
@@ -28,6 +30,7 @@ def submit_image(image_uri: str, prompt: str):
     from pathlib import Path
 
     import requests
+
     BASE_URL = "http://localhost:8000"
 
     if "://" not in image_uri:

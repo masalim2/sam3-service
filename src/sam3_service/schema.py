@@ -99,6 +99,7 @@ class BatchResponse(BaseModel):
     """
 
     result_path: Path
+    runtime_info: dict[str, Any] | None = None
 
 
 class SAM3ImageResult(BaseModel):

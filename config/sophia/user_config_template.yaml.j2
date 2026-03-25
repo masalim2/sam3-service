@@ -25,7 +25,14 @@ engine:
     nodes_per_block: 1
     walltime: 24:00:00
     worker_init: |
+      set -euo pipefail
+
+      LOG_DIR="/eagle/inference_service/sam3-service/logs"
+      mkdir -p $LOG_DIR
+      LOG_FILE="${LOG_DIR}/server_$(hostname)_$$.log"
+
       source /eagle/inference_service/sam3-service/.venv/bin/activate
+
       export SAM3_DIR={{sam3_weights_dir | default("/eagle/inference_service/sam3-service/weights/") }}
       export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
       export HTTPS_PROXY="http://proxy.alcf.anl.gov:3128"
@@ -33,4 +40,28 @@ engine:
       export https_proxy="http://proxy.alcf.anl.gov:3128"
       export ftp_proxy="http://proxy.alcf.anl.gov:3128"
       export no_proxy="admin,polaris-adminvm-01,localhost,*.cm.polaris.alcf.anl.gov,polaris-*,*.polaris.alcf.anl.gov,*.alcf.anl.gov"
-      nohup uvicorn sam3_service.app:app --host 0.0.0.0 >& /eagle/inference_service/sam3-service/server_$(hostname)_$$.log &
+
+      nohup uvicorn sam3_service.app:app --host 0.0.0.0 > "$LOG_FILE" 2>&1 &
+      SERVER_PID=$!
+      echo "Started uvicorn (PID=$SERVER_PID), logging to $LOG_FILE"
+
+      # Poll until the model is loaded or the process dies
+      TIMEOUT=300
+      ELAPSED=0
+      INTERVAL=5
+
+      while ! grep -q "Uvicorn running on http://0.0.0.0:8000" "$LOG_FILE" 2>/dev/null; do
+          if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "ERROR: uvicorn (PID=$SERVER_PID) exited before model loaded." >&2
+              tail -20 "$LOG_FILE" >&2
+              exit 1
+          fi
+          if (( ELAPSED >= TIMEOUT )); then
+              echo "ERROR: Timed out after ${TIMEOUT}s waiting for model load." >&2
+              tail -20 "$LOG_FILE" >&2
+              exit 1
+          fi
+          sleep "$INTERVAL"
+          (( ELAPSED += INTERVAL ))
+      done
+      echo "Model loaded successfully (${ELAPSED}s elapsed)."
