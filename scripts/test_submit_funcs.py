@@ -1,4 +1,4 @@
-from pathlib import Path
+import time
 
 from globus_compute_sdk import Client
 from globus_compute_sdk.errors import TaskPending
@@ -10,8 +10,8 @@ gcc = Client()
 # Registered submit_image: func_uuid='6846d472-3714-49c9-87d1-2cec3124d582'
 ENDPOINT_ID = "25662117-d605-4f43-af9b-1b9ae390e4e2"
 FUNCS = {
-    "submit_batch": "805ad46e-e7d0-4319-ac75-8556a1e4de48",
-    "submit_image": "6846d472-3714-49c9-87d1-2cec3124d582",
+    "submit_batch": "37e51c9c-b63f-4ac4-aee2-c070a5b301eb",
+    "submit_image": "e8cc9f78-2c7f-4cb1-954a-f949b2f642fa",
 }
 
 
@@ -40,6 +40,7 @@ while True:
   except Exception as e:
     print(f"Batch task failed: {e}")
     break
+  time.sleep(10)
 
 print("Polling on single image task...")
 while True:
@@ -51,3 +52,4 @@ while True:
   except Exception as e:
     print(f"Single image task failed: {e}")
     break
+  time.sleep(10)

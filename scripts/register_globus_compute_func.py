@@ -5,8 +5,6 @@ from globus_compute_sdk import Client
 gcc = Client()
 
 # sophia-sam3 endpoint @ /home/openinference_svc/
-# Registered submit_batch: func_uuid='805ad46e-e7d0-4319-ac75-8556a1e4de48'
-# Registered submit_image: func_uuid='6846d472-3714-49c9-87d1-2cec3124d582'
 ENDPOINT_ID = "25662117-d605-4f43-af9b-1b9ae390e4e2"
 BASE_URL = "http://localhost:8000"
 
@@ -15,6 +13,7 @@ def submit_batch(dataset_path: str | Path):
     from pathlib import Path
 
     import requests
+    BASE_URL = "http://localhost:8000"
 
     dataset_path = Path(dataset_path).resolve()
     if not dataset_path.is_file():
@@ -34,6 +33,7 @@ def submit_image(image_uri: str, prompt: str):
     from pathlib import Path
 
     import requests
+    BASE_URL = "http://localhost:8000"
 
     if "://" not in image_uri:
         image_uri = "file://" + Path(image_uri).resolve().as_posix()
