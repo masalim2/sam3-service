@@ -4,11 +4,7 @@ gcc = Client()
 
 # sophia-sam3 endpoint @ /home/openinference_svc/
 ENDPOINT_ID = "25662117-d605-4f43-af9b-1b9ae390e4e2"
-
-FUNCS = {
-    "submit_batch": "2b11a95d-4199-4efd-bb59-450d5be35868",
-    "submit_image": "82798750-395f-4df3-befd-6cd59fd2fe1c",
-}
+FUNC_ID = "26ff10a2-c944-4f1d-bf53-d3df96bf5baa"
 
 with Executor(
     endpoint_id=ENDPOINT_ID,
@@ -18,9 +14,10 @@ with Executor(
     },
 ) as gce:
     fut = gce.submit_to_registered_function(
-        function_id=FUNCS["submit_batch"],
+        function_id=FUNC_ID,
         kwargs={
-            "dataset_path": "/eagle/inference_service/sam3-service/examples/wds-test/shard-00000.tar"
+            "inference_type": "batch",
+            "dataset_path": "/eagle/inference_service/sam3-service/examples/wds-test/shard-00000.tar",
         },
     )
     print(f"Submitted batch inference {fut.task_id=}")
@@ -29,7 +26,7 @@ with Executor(
 
 with Executor(endpoint_id=ENDPOINT_ID, client=gcc) as gce:
     fut = gce.submit_to_registered_function(
-        function_id=FUNCS["submit_image"],
+        function_id=FUNC_ID,
         kwargs=dict(
             image_uri="https://raw.githubusercontent.com/masalim2/sam3-service/refs/heads/main/examples/images/groceries.jpg",
             prompt="grocery bag",

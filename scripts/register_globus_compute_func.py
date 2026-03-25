@@ -1,8 +1,9 @@
-from typing import TypedDict, Literal
+from typing import Literal, TypedDict
 
 from globus_compute_sdk import Client
 
 gcc = Client()
+
 
 class Payload(TypedDict):
     inference_type: Literal["single-image", "batch"]
@@ -19,7 +20,7 @@ def submit(payload: Payload):
 
     if payload["inference_type"] == "single-image":
         image_uri = payload["data_uri"]
-        prompt  = payload["single_image_prompt"]
+        prompt = payload["single_image_prompt"]
 
         if "://" not in image_uri:
             image_uri = "file://" + Path(image_uri).resolve().as_posix()
@@ -30,7 +31,7 @@ def submit(payload: Payload):
         )
 
     elif payload["inference_type"] == "batch":
-        dataset_path = Path(dataset_path).resolve()
+        dataset_path = Path(payload["data_uri"]).resolve()
 
         if not dataset_path.is_file():
             raise FileNotFoundError(f"Could not locate {dataset_path}")
