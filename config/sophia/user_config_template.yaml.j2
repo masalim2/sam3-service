@@ -41,7 +41,7 @@ engine:
       export ftp_proxy="http://proxy.alcf.anl.gov:3128"
       export no_proxy="admin,polaris-adminvm-01,localhost,*.cm.polaris.alcf.anl.gov,polaris-*,*.polaris.alcf.anl.gov,*.alcf.anl.gov"
 
-      nohup uvicorn sam3_service.app:app --host 0.0.0.0 > "$LOG_FILE" 2>&1 &
+      nohup uvicorn sam3_service.app:app --host 127.0.0.1 > "$LOG_FILE" 2>&1 &
       SERVER_PID=$!
       echo "Started uvicorn (PID=$SERVER_PID), logging to $LOG_FILE"
 
@@ -50,7 +50,7 @@ engine:
       ELAPSED=0
       INTERVAL=5
 
-      while ! grep -q "Uvicorn running on http://0.0.0.0:8000" "$LOG_FILE" 2>/dev/null; do
+      while ! grep -q "Uvicorn running on http://127.0.0.1:8000" "$LOG_FILE" 2>/dev/null; do
           if ! kill -0 "$SERVER_PID" 2>/dev/null; then
               echo "ERROR: uvicorn (PID=$SERVER_PID) exited before model loaded." >&2
               tail -20 "$LOG_FILE" >&2
