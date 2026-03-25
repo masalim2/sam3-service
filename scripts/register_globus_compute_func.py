@@ -5,6 +5,8 @@ from globus_compute_sdk import Client
 gcc = Client()
 
 # sophia-sam3 endpoint @ /home/openinference_svc/
+# Registered submit_batch: func_uuid='805ad46e-e7d0-4319-ac75-8556a1e4de48'
+# Registered submit_image: func_uuid='6846d472-3714-49c9-87d1-2cec3124d582'
 ENDPOINT_ID = "25662117-d605-4f43-af9b-1b9ae390e4e2"
 BASE_URL = "http://localhost:8000"
 

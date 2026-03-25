@@ -1,0 +1,37 @@
+amqp_port: 443
+display_name: sophia-sam3
+engine:
+  type: GlobusComputeEngine
+  max_retries_on_system_failure: 1
+  max_workers_per_node: 16
+
+  job_status_kwargs:
+    max_idletime: 7200
+  
+  address:
+    type: address_by_interface
+    ifname: bond0.2210
+
+  provider:
+    type: PBSProProvider
+    launcher:
+      type: SimpleLauncher
+    account: inference_service
+    select_options: ngpus=8
+    scheduler_options: '#PBS -l filesystems=home:eagle'
+    queue: 'infer-svc'
+    init_blocks: 0
+    max_blocks: 1
+    min_blocks: 0
+    nodes_per_block: 1
+    walltime: 24:00:00
+    worker_init: |
+      source /eagle/inference_service/sam3-service/.venv/bin/activate
+      export SAM3_DIR=/eagle/inference_service/sam3-service/weights/
+      export HTTP_PROXY="http://proxy.alcf.anl.gov:3128"
+      export HTTPS_PROXY="http://proxy.alcf.anl.gov:3128"
+      export http_proxy="http://proxy.alcf.anl.gov:3128"
+      export https_proxy="http://proxy.alcf.anl.gov:3128"
+      export ftp_proxy="http://proxy.alcf.anl.gov:3128"
+      export no_proxy="admin,polaris-adminvm-01,localhost,*.cm.polaris.alcf.anl.gov,polaris-*,*.polaris.alcf.anl.gov,*.alcf.anl.gov"
+      nohup uvicorn sam3_service.app:app --host 0.0.0.0 >& /eagle/inference_service/sam3-service/server_$(hostname)_$$.log &
