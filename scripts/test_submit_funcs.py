@@ -3,8 +3,8 @@ from globus_compute_sdk import Client, Executor
 gcc = Client()
 
 # sophia-sam3 endpoint @ /home/openinference_svc/
-ENDPOINT_ID = "25662117-d605-4f43-af9b-1b9ae390e4e2"
-FUNC_ID = "7c6ed5c4-8a7a-4cd6-834b-b653680c1475"
+ENDPOINT_ID = "6699c6a0-2ce3-4798-b85c-3e65d93b68dd"
+FUNC_ID = "c5653f2c-98c8-4dd3-800d-ef7439c7e140"
 
 with Executor(
     endpoint_id=ENDPOINT_ID,
