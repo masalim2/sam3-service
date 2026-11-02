@@ -72,8 +72,8 @@ def submit_batch(
     """
     logger.info("Sending request...")
     resp = requests.post(
-        f"{base_url}/process-batch",
-        json={"dataset_path": dataset_path.resolve().as_posix()},
+        f"{base_url}/v1/promptable-segmentation",
+        json={"inference_type": "batch", "data_uri": dataset_path.as_posix()},
     )
     resp.raise_for_status()
     logger.info(resp.json())
@@ -92,8 +92,12 @@ def submit_image(
         image_uri = "file://" + Path(image_uri).resolve().as_posix()
 
     resp = requests.post(
-        f"{base_url}/process-image",
-        json={"image_uri": image_uri, "prompt": {"text": prompt}},
+        f"{base_url}/v1/promptable-segmentation",
+        json={
+            "inference_type": "single-image",
+            "data_uri": image_uri,
+            "single_image_prompt": prompt,
+        },
     )
     resp.raise_for_status()
 

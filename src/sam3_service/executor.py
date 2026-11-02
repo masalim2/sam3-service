@@ -3,6 +3,7 @@ import multiprocessing as mp
 import tarfile
 from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing.synchronize import Event
+from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from time import perf_counter
@@ -68,6 +69,12 @@ class SAM3Executor:
         self.futures[req_id] = Future()
         return self.futures[req_id]
 
+    def ready(self) -> bool:
+        """True once every GPU worker has loaded the model and none has died."""
+        return not self.exit_event.is_set() and all(
+            worker.ready.is_set() for worker in self.workers
+        )
+
     def _health_checker(self):
         while not self.exit_event.wait(timeout=3.0):
             for worker in self.workers:
@@ -115,7 +122,7 @@ class SAM3Executor:
 
 
 class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
-    model: Sam3Wrapper
+    models: dict[Path, Sam3Wrapper]
     writer_thread: ThreadPoolExecutor
 
     def __init__(
@@ -130,6 +137,7 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
         self.exit_event = exit_event
         self.request_q = request_q
         self.result_q = result_q
+        self.ready = MP_CONTEXT.Event()
 
     def run(self) -> None:
         logging.basicConfig(
@@ -140,7 +148,8 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
         )
 
         logger.info(f"Loading SAM3Wrapper on {self.gpu_id=}")
-        self.model = Sam3Wrapper(self.gpu_id)
+        self.models = {CHECKPOINT_DIR: Sam3Wrapper(self.gpu_id)}
+        self.ready.set()
 
         # Must be single-threaded; tarfile is not threadsafe:
         self.writer_thread = ThreadPoolExecutor(max_workers=1)
@@ -159,6 +168,12 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
 
         self.writer_thread.shutdown(wait=True)
 
+    def get_model(self, weights_dir: Path) -> Sam3Wrapper:
+        """The default weights are preloaded; fine-tunes load once, on first use."""
+        if weights_dir not in self.models:
+            self.models[weights_dir] = Sam3Wrapper(self.gpu_id, weights_dir)
+        return self.models[weights_dir]
+
     def dispatch(self, req_id: RequestId, request: Request) -> None:
         if isinstance(request, BatchRequest):
             self.handle_batch_request(req_id, request)
@@ -175,7 +190,7 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
 
         t0 = perf_counter()
         with tarfile.open(result_path, mode="w") as tf:
-            for result in self.model.infer_batch(loader):
+            for result in self.get_model(request.weights_dir).infer_batch(loader):
                 fut = self.writer_thread.submit(result.dump_to_tarfile, tf)
                 write_futs.append(fut)
 
@@ -184,7 +199,7 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
 
         logger.info(f"Batch inference outputs written to {result_path}")
         info = {
-            "model_weights": CHECKPOINT_DIR.as_posix(),
+            "model_weights": request.weights_dir.as_posix(),
             "prompts/sec": len(write_futs) / (perf_counter() - t0),
         }
         self.result_q.put(
@@ -192,5 +207,5 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
         )
 
     def handle_image_request(self, req_id: RequestId, request: ImageRequest) -> None:
-        result = self.model.infer_image(request)
+        result = self.get_model(request.weights_dir).infer_image(request)
         self.result_q.put((req_id, result))

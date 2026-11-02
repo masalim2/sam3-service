@@ -3,7 +3,7 @@ import gzip
 import tarfile
 from io import BytesIO
 from pathlib import Path
-from typing import Annotated, Any, NamedTuple
+from typing import Annotated, Any, Literal, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -15,6 +15,7 @@ from pydantic import (
     computed_field,
 )
 
+from .config import CHECKPOINT_DIR
 from .tar_helpers import add_member
 
 NDArray = npt.NDArray[Any]
@@ -82,6 +83,7 @@ class BatchRequest(BaseModel):
     """
 
     dataset_path: Path
+    weights_dir: Path = CHECKPOINT_DIR
 
 
 class ImageRequest(BaseModel):
@@ -91,6 +93,18 @@ class ImageRequest(BaseModel):
 
     image_uri: str
     prompt: Prompt
+    weights_dir: Path = CHECKPOINT_DIR
+
+
+class SegmentationTask(BaseModel):
+    """
+    Body of the gateway's `promptable-segmentation` task.
+    """
+
+    inference_type: Literal["single-image", "batch"]
+    data_uri: str
+    single_image_prompt: str | None = None
+    weights_dir_override: Path | None = None
 
 
 class BatchResponse(BaseModel):

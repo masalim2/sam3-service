@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 from time import perf_counter
 from typing import Iterator
 
@@ -25,9 +26,9 @@ def to_labelmap(masks: torch.Tensor):
 
 
 class Sam3Wrapper:
-    def __init__(self, gpu_id: int) -> None:
+    def __init__(self, gpu_id: int, weights_dir: Path = CHECKPOINT_DIR) -> None:
         """
-        Load model onto CUDA device ID `gpu_id`.
+        Load the weights in `weights_dir` onto CUDA device ID `gpu_id`.
         """
         self.device = torch.device(f"cuda:{gpu_id}")
         torch.cuda.set_device(gpu_id)
@@ -37,10 +38,10 @@ class Sam3Wrapper:
         torch.backends.cudnn.allow_tf32 = True
 
         self.model = Sam3Model.from_pretrained(
-            CHECKPOINT_DIR, local_files_only=True
+            weights_dir, local_files_only=True
         ).to(self.device)  # type: ignore
 
-        logger.info(f"Loaded SAM3 from {CHECKPOINT_DIR} on {gpu_id=}")
+        logger.info(f"Loaded SAM3 from {weights_dir} on {gpu_id=}")
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
     @torch.inference_mode()
