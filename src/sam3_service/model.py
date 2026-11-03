@@ -1,16 +1,16 @@
 import logging
-from pathlib import Path
+from io import BytesIO
 from time import perf_counter
 from typing import Iterator
 
 import numpy as np
-import smart_open
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader
 from transformers import BatchEncoding, Sam3Model
 
 from .config import CHECKPOINT_DIR
+from . import safe_fs
 from .data import InputInfo, preprocess_image, processor
 from .schema import ImageRequest, SAM3ImageResult
 
@@ -26,9 +26,10 @@ def to_labelmap(masks: torch.Tensor):
 
 
 class Sam3Wrapper:
-    def __init__(self, gpu_id: int, weights_dir: Path = CHECKPOINT_DIR) -> None:
+    def __init__(self, gpu_id: int) -> None:
         """
-        Load the weights in `weights_dir` onto CUDA device ID `gpu_id`.
+        Load the server's launch-configured weights (CHECKPOINT_DIR) onto CUDA
+        device ID `gpu_id`.
         """
         self.device = torch.device(f"cuda:{gpu_id}")
         torch.cuda.set_device(gpu_id)
@@ -37,17 +38,23 @@ class Sam3Wrapper:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
+        # safetensors only: refuse pickle-based (.bin/.pt) weight files, which
+        # can execute arbitrary code when loaded.
         self.model = Sam3Model.from_pretrained(
-            weights_dir, local_files_only=True
+            CHECKPOINT_DIR,
+            local_files_only=True,
+            use_safetensors=True,
+            trust_remote_code=False,
         ).to(self.device)  # type: ignore
 
-        logger.info(f"Loaded SAM3 from {weights_dir} on {gpu_id=}")
+        logger.info(f"Loaded SAM3 from {CHECKPOINT_DIR} on {gpu_id=}")
 
     @torch.autocast("cuda", dtype=torch.bfloat16)
     @torch.inference_mode()
     def infer_image(self, request: ImageRequest) -> SAM3ImageResult:
-        with smart_open.open(request.image_uri, "rb") as fp:
-            image = Image.open(fp)
+        staged = request.image
+        data = safe_fs.read_file(staged.anchor, staged.parts)
+        with Image.open(BytesIO(data)) as image:
             inputs = preprocess_image(image, request.prompt).to(self.device)
 
         outputs = self.model(**inputs)
@@ -60,7 +67,7 @@ class Sam3Wrapper:
         )[0]
 
         return SAM3ImageResult(
-            input_image=request.image_uri,
+            input_image=request.image.path.as_uri(),
             prompt=request.prompt,
             batch_slug="",
             scores=r["scores"].cpu().tolist(),

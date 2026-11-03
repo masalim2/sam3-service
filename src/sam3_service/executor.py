@@ -1,9 +1,10 @@
 import logging
 import multiprocessing as mp
+import os
 import tarfile
+from contextlib import ExitStack
 from concurrent.futures import Future, ThreadPoolExecutor
 from multiprocessing.synchronize import Event
-from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from time import perf_counter
@@ -11,7 +12,10 @@ from typing import NewType, overload
 from uuid import uuid4
 
 import torch
+from PIL import Image, UnidentifiedImageError
 from rich.logging import RichHandler
+
+from . import safe_fs
 
 from .config import CHECKPOINT_DIR
 from .data import build_dataloader
@@ -31,6 +35,23 @@ MP_CONTEXT = mp.get_context("spawn")
 
 
 class SAM3Error(RuntimeError): ...
+
+
+class SAM3InputError(SAM3Error):
+    """The caller's staged data was missing, unsafe, or undecodable."""
+
+
+# Failures caused by the caller's staged data rather than by the server.
+INPUT_ERRORS = (
+    safe_fs.UnsafePathError,
+    FileNotFoundError,
+    NotADirectoryError,
+    IsADirectoryError,
+    PermissionError,
+    tarfile.TarError,
+    UnidentifiedImageError,
+    Image.DecompressionBombError,
+)
 
 
 Result = BatchResponse | SAM3ImageResult | SAM3Error
@@ -122,7 +143,7 @@ class SAM3Executor:
 
 
 class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
-    models: dict[Path, Sam3Wrapper]
+    model: Sam3Wrapper
     writer_thread: ThreadPoolExecutor
 
     def __init__(
@@ -148,7 +169,7 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
         )
 
         logger.info(f"Loading SAM3Wrapper on {self.gpu_id=}")
-        self.models = {CHECKPOINT_DIR: Sam3Wrapper(self.gpu_id)}
+        self.model = Sam3Wrapper(self.gpu_id)
         self.ready.set()
 
         # Must be single-threaded; tarfile is not threadsafe:
@@ -162,17 +183,14 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
 
             try:
                 self.dispatch(req_id, request)
+            except INPUT_ERRORS as exc:
+                logger.warning(f"Rejected staged data for {request=}: {exc!r}")
+                self.result_q.put((req_id, SAM3InputError(f"Rejected input: {exc}")))
             except Exception as exc:
                 logger.exception(msg := f"Worker exception during {request=}: {exc}")
                 self.result_q.put((req_id, SAM3Error(msg)))
 
         self.writer_thread.shutdown(wait=True)
-
-    def get_model(self, weights_dir: Path) -> Sam3Wrapper:
-        """The default weights are preloaded; fine-tunes load once, on first use."""
-        if weights_dir not in self.models:
-            self.models[weights_dir] = Sam3Wrapper(self.gpu_id, weights_dir)
-        return self.models[weights_dir]
 
     def dispatch(self, req_id: RequestId, request: Request) -> None:
         if isinstance(request, BatchRequest):
@@ -183,23 +201,37 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
             raise AssertionError(f"Unknown request type: {request}")
 
     def handle_batch_request(self, req_id: RequestId, request: BatchRequest) -> None:
-        loader = build_dataloader(request.dataset_path, batch_size=4, num_workers=8)
-
-        result_path = request.dataset_path.with_suffix(".results.tar")
+        staged = request.dataset
+        *dir_parts, tar_name = staged.parts
+        result_name = tar_name.removesuffix(".tar") + ".results.tar"
+        result_path = staged.path.with_name(result_name)
         write_futs: list[Future] = []
 
-        t0 = perf_counter()
-        with tarfile.open(result_path, mode="w") as tf:
-            for result in self.get_model(request.weights_dir).infer_batch(loader):
-                fut = self.writer_thread.submit(result.dump_to_tarfile, tf)
-                write_futs.append(fut)
+        with ExitStack() as stack:
+            # Open the input once, without following symlinks; the DataLoader
+            # workers inherit this fd and never re-open the staged path.
+            dir_fd = safe_fs.open_dir(staged.anchor, dir_parts)
+            stack.callback(os.close, dir_fd)
+            tar_fd = safe_fs.open_file(dir_fd, tar_name)
+            stack.callback(os.close, tar_fd)
 
-            for fut in write_futs:
-                fut.result(timeout=90)
+            loader = build_dataloader(tar_fd, tar_name, batch_size=4, num_workers=8)
+
+            t0 = perf_counter()
+            with (
+                safe_fs.atomic_write(dir_fd, result_name) as fp,
+                tarfile.open(fileobj=fp, mode="w") as tf,
+            ):
+                for result in self.model.infer_batch(loader):
+                    fut = self.writer_thread.submit(result.dump_to_tarfile, tf)
+                    write_futs.append(fut)
+
+                for fut in write_futs:
+                    fut.result(timeout=90)
 
         logger.info(f"Batch inference outputs written to {result_path}")
         info = {
-            "model_weights": request.weights_dir.as_posix(),
+            "model_weights": CHECKPOINT_DIR.as_posix(),
             "prompts/sec": len(write_futs) / (perf_counter() - t0),
         }
         self.result_q.put(
@@ -207,5 +239,5 @@ class _SAM3Worker(MP_CONTEXT.Process):  # type: ignore[unsupported-base]
         )
 
     def handle_image_request(self, req_id: RequestId, request: ImageRequest) -> None:
-        result = self.get_model(request.weights_dir).infer_image(request)
+        result = self.model.infer_image(request)
         self.result_q.put((req_id, result))

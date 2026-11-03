@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import tarfile
@@ -15,13 +16,16 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import BatchEncoding, Sam3Processor
 
 from .config import CHECKPOINT_DIR
+from . import safe_fs
 from .schema import Prompt
 from .utils import quantile_norm
 
 NDArray = npt.NDArray[Any]
 
 logger = logging.getLogger(__name__)
-processor = Sam3Processor.from_pretrained(CHECKPOINT_DIR, local_files_only=True)
+processor = Sam3Processor.from_pretrained(
+    CHECKPOINT_DIR, local_files_only=True, trust_remote_code=False
+)
 
 
 def _pil_load(path: IO[bytes] | Path) -> Image.Image:
@@ -31,8 +35,10 @@ def _pil_load(path: IO[bytes] | Path) -> Image.Image:
 
 
 def _np_safeload(buf: IO[bytes] | Path) -> NDArray:
+    """Load a .npy array; object (pickled) arrays are rejected."""
     if isinstance(buf, Path):
-        buf = buf.open("rb")
+        with buf.open("rb") as fp:
+            return np.load(BytesIO(fp.read()), allow_pickle=False)
     return np.load(BytesIO(buf.read()), allow_pickle=False)
 
 
@@ -67,9 +73,14 @@ class WebDataset(Dataset[Sample]):
         "npy": _np_safeload,
     }
 
-    def __init__(self, tar_path: str | Path) -> None:
-        self.tar_path = tar_path
-        with tarfile.open(tar_path) as tf:
+    def __init__(self, tar_fd: int, name: str) -> None:
+        """
+        `tar_fd` is an already safely-opened fd (see safe_fs.open_file); it is
+        inherited by forked DataLoader workers and must outlive the loader.
+        """
+        self.tar_fd = tar_fd
+        self.name = name
+        with self._open_tar() as tf:
             filenames = [f.name for f in tf if f.isfile()]
 
         self.suffix_map: dict[str, list[str]] = defaultdict(list)
@@ -91,14 +102,24 @@ class WebDataset(Dataset[Sample]):
         if self.keys:
             logger.info(f"Initialized WebDataset with {len(self.keys)} keys")
         else:
-            logger.warning(f"No samples in WebDataset {self.tar_path}")
+            logger.warning(f"No samples in WebDataset {self.name}")
+
+    def _open_tar(self) -> tarfile.TarFile:
+        # pread-based reader: independent offset per open, safe across forks.
+        fileobj = io.BufferedReader(safe_fs.PreadReader(self.tar_fd))
+        return tarfile.open(fileobj=fileobj, mode="r")
 
     def __getitem__(self, index: int) -> Sample:
         key = self.keys[index]
 
-        with tarfile.open(self.tar_path) as tf:
+        with self._open_tar() as tf:
             assert (json_fp := tf.extractfile(f"{key}.json")) is not None
-            prompts = json.load(json_fp).get("prompts", [])
+            meta = json.load(json_fp)
+            if not isinstance(meta, dict):
+                raise ValueError(f"{key}.json: expected a JSON object")
+            prompts = meta.get("prompts", [])
+            if not isinstance(prompts, list):
+                raise ValueError(f"{key}.json: 'prompts' must be a list")
 
             ext = next(e for e in self.suffix_map[key] if e in self._decoders)
             image_name = f"{key}.{ext}"
@@ -108,7 +129,7 @@ class WebDataset(Dataset[Sample]):
         return Sample(
             image_filename=image_name,
             image=image,
-            prompts=[Prompt(**p) for p in prompts],
+            prompts=[Prompt.model_validate(p) for p in prompts],
         )
 
     def __len__(self):
@@ -178,9 +199,9 @@ def preprocess_batch(samples: list[Sample]) -> tuple[list[InputInfo], BatchEncod
 
 
 def build_dataloader(
-    tar_path: Path | str, batch_size: int, num_workers: int
+    tar_fd: int, name: str, batch_size: int, num_workers: int
 ) -> DataLoader:
-    dataset = WebDataset(tar_path)
+    dataset = WebDataset(tar_fd, name)
     return DataLoader(
         dataset,
         batch_size=batch_size,

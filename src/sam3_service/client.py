@@ -5,7 +5,7 @@ from concurrent.futures import ProcessPoolExecutor, wait
 from io import BytesIO
 from math import ceil
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import numpy as np
 import numpy.typing as npt
@@ -26,6 +26,16 @@ logging.basicConfig(level="INFO", handlers=[RichHandler()])
 logger = logging.getLogger("sam3_service.client")
 
 cli = typer.Typer(no_args_is_help=True)
+
+UserIdOption = typer.Option(
+    envvar="FIRST_USER_ID",
+    help="Sent as X-First-User-Id when calling the server directly "
+    "(the FIRST gateway sets it for you).",
+)
+
+
+def _headers(user_id: str | None) -> dict[str, str]:
+    return {"X-First-User-Id": user_id} if user_id else {}
 
 
 def load_image(img_path: Path) -> NDArray:
@@ -64,6 +74,7 @@ def write_wds_shard(
 def submit_batch(
     dataset_path: Path,
     base_url: str = "http://sophia-gpu-10:8000",
+    user_id: Annotated[str | None, UserIdOption] = None,
 ) -> None:
     """
     Submit a WebDataset-structured tar file for batch inference.
@@ -73,7 +84,8 @@ def submit_batch(
     logger.info("Sending request...")
     resp = requests.post(
         f"{base_url}/v1/promptable-segmentation",
-        json={"inference_type": "batch", "data_uri": dataset_path.as_posix()},
+        json={"inference_type": "batch", "data_uri": dataset_path.resolve().as_posix()},
+        headers=_headers(user_id),
     )
     resp.raise_for_status()
     logger.info(resp.json())
@@ -85,6 +97,7 @@ def submit_image(
     prompt: str,
     base_url: str = "http://sophia-gpu-10:8000",
     save_preview: Path | None = None,
+    user_id: Annotated[str | None, UserIdOption] = None,
 ) -> None:
     logger.info("Sending request...")
 
@@ -98,6 +111,7 @@ def submit_image(
             "data_uri": image_uri,
             "single_image_prompt": prompt,
         },
+        headers=_headers(user_id),
     )
     resp.raise_for_status()
 
@@ -129,12 +143,12 @@ def preview_batch_results(input_tar: Path, result_tar: Path) -> None:
                 continue
 
             assert (img_fp := img_tf.extractfile(result["input_image"])) is not None
-            image = quantile_norm(np.load(BytesIO(img_fp.read())))
+            image = quantile_norm(np.load(BytesIO(img_fp.read()), allow_pickle=False))
 
             assert (
                 label_fp := tf.extractfile(fname.replace(".json", ".labels.npy"))
             ) is not None
-            labelmap = np.load(BytesIO(label_fp.read()))
+            labelmap = np.load(BytesIO(label_fp.read()), allow_pickle=False)
 
             result = SAM3ImageResult(**result, labelmap_npy=labelmap)
 

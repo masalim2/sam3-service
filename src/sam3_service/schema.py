@@ -13,9 +13,9 @@ from pydantic import (
     ConfigDict,
     PlainSerializer,
     computed_field,
+    model_validator,
 )
 
-from .config import CHECKPOINT_DIR
 from .tar_helpers import add_member
 
 NDArray = npt.NDArray[Any]
@@ -76,24 +76,39 @@ class Prompt(BaseModel):
     boxes: list[BboxPrompt] | None = None
 
 
+class StagedFile(BaseModel):
+    """
+    A file in a user's staging area, as `anchor` (the trusted, canonical
+    <staging root>/<user id> directory) plus the path components below it.
+
+    Workers open it by walking `parts` from `anchor` with O_NOFOLLOW (see
+    safe_fs), so a symlink swapped in after validation is never followed.
+    """
+
+    anchor: Path
+    parts: tuple[str, ...]
+
+    @property
+    def path(self) -> Path:
+        return self.anchor.joinpath(*self.parts)
+
+
 class BatchRequest(BaseModel):
     """
     Request to run inference on all Samples defined in a WebDataset-compliant
     tar archive.
     """
 
-    dataset_path: Path
-    weights_dir: Path = CHECKPOINT_DIR
+    dataset: StagedFile
 
 
 class ImageRequest(BaseModel):
     """
-    Request to run inference on a single image URI.
+    Request to run inference on a single staged image.
     """
 
-    image_uri: str
+    image: StagedFile
     prompt: Prompt
-    weights_dir: Path = CHECKPOINT_DIR
 
 
 class SegmentationTask(BaseModel):
@@ -104,7 +119,21 @@ class SegmentationTask(BaseModel):
     inference_type: Literal["single-image", "batch"]
     data_uri: str
     single_image_prompt: str | None = None
-    weights_dir_override: Path | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_weights_override(cls, data: Any) -> Any:
+        """
+        Checkpoints are configured only at server launch (SAM3_DIR). Reject the
+        retired `weights_dir_override` field loudly rather than silently
+        ignoring it and serving results from different weights.
+        """
+        if isinstance(data, dict) and data.get("weights_dir_override") is not None:
+            raise ValueError(
+                "weights_dir_override is not supported: model weights are "
+                "configured at server launch"
+            )
+        return data
 
 
 class BatchResponse(BaseModel):
